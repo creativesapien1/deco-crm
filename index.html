@@ -2634,6 +2634,8 @@ function renderPage(name){
     default: pc.innerHTML='<div class="es"><div class="ei">🚧</div>Coming soon...</div>';
   }
   updS(); updBadges();
+  // Sync primary action button to mobile header (after render completes)
+  setTimeout(syncMobileActions, 60);
 }
 
 // ============================================================
@@ -3347,6 +3349,8 @@ function updateMyMapLiveDot(){
 // ============================================================
 function renderCustomersPage(pc,ta){
   ta.innerHTML=`<input type="text" class="si" placeholder="Search customers..." oninput="filterCustomers(this.value)"><button class="btn btn-gold" style="margin-left:8px" onclick="openM('mCust');updCustSP()">Add Customer</button><button class="btn btn-blue" style="margin-left:6px" onclick="openM('mBulkParty')">Bulk Upload</button>`;
+  // Immediately sync the Add Customer button to mobile header
+  requestAnimationFrame(syncMobileActions);
   const list=curUser.role==='admin'?customers:customers.filter(c=>c.spId===curUser.id);
   pc.innerHTML=`<div class="cg" id="custGrid">${renderCustCards(list)}</div>`;
 }
@@ -3749,68 +3753,62 @@ function renderAttPage(pc){
   const uid=curUser.role==='admin'?'admin':curUser.id;
   const sp=curUser.role==='admin'?{name:'Admin',visits:0,orders:orders.length,km:'—',pd:22}:spList.find(s=>s.id===curUser.id)||{};
   const attData=att[uid]||{};
-  const presentDays=Object.values(attData).filter(v=>v==='pr').length + (Object.values(attData).includes('td')?1:0);
+  const presentDays=Object.values(attData).filter(v=>v==='pr').length+(Object.values(attData).includes('td')?1:0);
   const absentDays=Object.values(attData).filter(v=>v==='ab').length;
   const now=new Date();
   const monthNames=['January','February','March','April','May','June','July','August','September','October','November','December'];
   const calTitle=monthNames[now.getMonth()]+' '+now.getFullYear();
+  // Build calendar HTML separately so template literal stays clean
+  const calHTML=buildCal(uid);
   pc.innerHTML=`
-    <div class="att-grid" style="display:grid;grid-template-columns:220px 1fr;gap:14px">
-      <div class="card">
-        <div class="card-h"><span class="card-t">Summary</span></div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px">
-          <div style="background:var(--sur2);border-radius:10px;padding:12px">
-            <div style="font-size:11px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.4px">Present</div>
-            <div style="font-size:28px;font-weight:800;color:var(--grn);letter-spacing:-1px;line-height:1.1;margin-top:4px">${presentDays}</div>
-            <div style="font-size:10px;color:var(--mut);margin-top:2px">days this month</div>
-          </div>
-          <div style="background:var(--sur2);border-radius:10px;padding:12px">
-            <div style="font-size:11px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.4px">Absent</div>
-            <div style="font-size:28px;font-weight:800;color:var(--red);letter-spacing:-1px;line-height:1.1;margin-top:4px">${absentDays}</div>
-            <div style="font-size:10px;color:var(--mut);margin-top:2px">days this month</div>
-          </div>
-          <div style="background:var(--sur2);border-radius:10px;padding:12px">
-            <div style="font-size:11px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.4px">Orders</div>
-            <div style="font-size:28px;font-weight:800;color:var(--acc);letter-spacing:-1px;line-height:1.1;margin-top:4px">${sp.orders||0}</div>
-            <div style="font-size:10px;color:var(--mut);margin-top:2px">total placed</div>
-          </div>
-          <div style="background:var(--sur2);border-radius:10px;padding:12px">
-            <div style="font-size:11px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.4px">Visits</div>
-            <div style="font-size:28px;font-weight:800;color:var(--pur);letter-spacing:-1px;line-height:1.1;margin-top:4px">${sp.visits||0}</div>
-            <div style="font-size:10px;color:var(--mut);margin-top:2px">check-ins done</div>
-          </div>
-        </div>
+    <!-- ── Stats row (always 2x2) ── -->
+    <div class="g2 mob-2" style="margin-bottom:14px">
+      <div class="sc grn"><div class="sc-l">Present Days</div><div class="sc-v">${presentDays}</div><div class="sc-s">This month</div></div>
+      <div class="sc red"><div class="sc-l">Absent Days</div><div class="sc-v">${absentDays}</div><div class="sc-s">This month</div></div>
+      <div class="sc gold"><div class="sc-l">Total Orders</div><div class="sc-v">${sp.orders||0}</div><div class="sc-s">Placed</div></div>
+      <div class="sc pur"><div class="sc-l">Total Visits</div><div class="sc-v">${sp.visits||0}</div><div class="sc-s">Check-ins</div></div>
+    </div>
+    <!-- ── Calendar card (full width, always) ── -->
+    <div class="card" style="margin-bottom:14px">
+      <div class="card-h">
+        <span class="card-t">${calTitle} — ${sp.name||'Admin'}</span>
       </div>
-      <div class="card">
-        <div class="card-h"><span class="card-t">${calTitle} — ${sp.name||'Admin'}</span></div>
-        <div class="acal-head" style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:3px;margin-bottom:6px">
-          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600;padding:2px 0">S</div>
-          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600;padding:2px 0">M</div>
-          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600;padding:2px 0">T</div>
-          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600;padding:2px 0">W</div>
-          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600;padding:2px 0">T</div>
-          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600;padding:2px 0">F</div>
-          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600;padding:2px 0">S</div>
-        </div>
-        <div class="acal" style="grid-template-columns:repeat(7,minmax(0,1fr))">${buildCal(uid)}</div>
-        </div></div>
-        <div style="display:flex;gap:12px;margin-top:10px;font-size:11px">
-          <span><span style="color:var(--grn)">■</span> Present</span>
-          <span><span style="color:var(--red)">■</span> Absent</span>
-          <span><span style="color:var(--acc)">■</span> Today</span>
-        </div>
+      <div class="acal-head" style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:3px;margin-bottom:6px">
+        <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600">Sun</div>
+        <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600">Mon</div>
+        <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600">Tue</div>
+        <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600">Wed</div>
+        <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600">Thu</div>
+        <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600">Fri</div>
+        <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600">Sat</div>
+      </div>
+      <div class="acal" style="grid-template-columns:repeat(7,minmax(0,1fr))">${calHTML}</div>
+      <div style="display:flex;gap:14px;margin-top:12px;font-size:11px;color:var(--mut)">
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:3px;background:var(--grn);display:inline-block;opacity:.7"></span>Present</span>
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:3px;background:var(--red);display:inline-block;opacity:.7"></span>Absent</span>
+        <span style="display:flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:3px;background:var(--acc);display:inline-block;opacity:.7"></span>Today</span>
       </div>
     </div>
-    <div class="card" style="margin-top:14px">
-      <div class="card-h"><span class="card-t">📋 All Agents Attendance — Today</span></div>
-      <div class="tw"><table><thead><tr><th>Agent</th><th>Punch In</th><th>Visits</th><th>Orders</th><th>Distance</th><th>Status</th></tr></thead>
-      <tbody>${spList.map((s,i)=>`<tr>
-        <td><div style="display:flex;align-items:center;gap:8px">
-          <div style="width:27px;height:27px;border-radius:7px;background:${C[i]}22;border:1px solid ${C[i]};display:flex;align-items:center;justify-content:center;font-weight:700;color:${C[i]}">${s.name.charAt(0)}</div>
-          <b>${s.name}</b></div></td>
-        <td>${s.cin}</td><td>${s.visits}</td><td>${s.orders}</td><td>${s.km}</td>
-        <td><span class="badge ${s.checkedIn?'b-grn':'b-red'}">${s.checkedIn?'Present':'Absent'}</span></td>
-      </tr>`).join('')}</tbody></table></div>
+    <!-- ── All agents table ── -->
+    <div class="card">
+      <div class="card-h"><span class="card-t">All Agents — Today</span></div>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Agent</th><th>Punch In</th><th>Visits</th><th>Orders</th><th>Distance</th><th>Status</th></tr></thead>
+          <tbody>${spList.map((s,i)=>`<tr>
+            <td><div style="display:flex;align-items:center;gap:8px">
+              <div style="width:27px;height:27px;border-radius:7px;background:${C[i%C.length]}22;border:1px solid ${C[i%C.length]};display:flex;align-items:center;justify-content:center;font-weight:700;color:${C[i%C.length]}">${s.name.charAt(0)}</div>
+              <b>${s.name}</b>
+            </div></td>
+            <td>${s.cin}</td>
+            <td>${s.visits}</td>
+            <td>${s.orders}</td>
+            <td>${s.km}</td>
+            <td><span class="badge ${s.checkedIn?'b-grn':'b-red'}">${s.checkedIn?'Present':'Absent'}</span></td>
+          </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
     </div>`;
 }
 function buildCal(uid){
