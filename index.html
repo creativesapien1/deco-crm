@@ -213,6 +213,7 @@ input,select,textarea,button{font-family:inherit}
   border-right:1px solid var(--bor);
   display:flex;flex-direction:column;
   position:fixed;top:0;left:0;bottom:0;z-index:100;
+  will-change:transform;
 }
 .sb-logo{
   padding:18px 20px 16px;
@@ -483,6 +484,12 @@ input,select,textarea,button{font-family:inherit}
 #visitMap{height:460px;border-radius:var(--r);border:1px solid var(--bor)}
 #spVisitMap{height:480px;width:100%;border-radius:var(--r);border:1px solid var(--bor)}
 .leaflet-container{background:#080c14!important}
+.leaflet-pane,.leaflet-tile-pane,.leaflet-map-pane{z-index:1!important}
+.leaflet-control-container{z-index:2!important}
+/* Ensure map containers don't let leaflet tiles escape */
+#dashMap,#trackMap,#visitMap,#spVisitMap,#cuMapDiv,#cvMapDiv,#offMapPreview{
+  overflow:hidden;isolation:isolate;
+}
 .apills{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
 .pill{padding:5px 12px;border-radius:8px;border:1px solid var(--bor);cursor:pointer;font-size:12px;font-weight:600;color:var(--mut);transition:all .15s}
 .pill:hover{border-color:var(--bor2);color:var(--txt2)}
@@ -495,8 +502,8 @@ input,select,textarea,button{font-family:inherit}
 /* ══════════════════════════════════════════════
    ATTENDANCE CALENDAR
 ══════════════════════════════════════════════ */
-.acal{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
-.aday{background:var(--sur2);border-radius:8px;padding:6px 3px;text-align:center;border:1px solid var(--bor);transition:all .15s}
+.acal{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+.aday{background:var(--sur2);border-radius:6px;padding:5px 2px;text-align:center;border:1px solid var(--bor);transition:all .15s;min-width:0}
 .aday.pr{border-color:rgba(14,163,113,.35);background:rgba(14,163,113,.07)}
 .aday.ab{border-color:rgba(229,62,62,.25);background:rgba(229,62,62,.05)}
 .aday.td{border-color:rgba(232,160,32,.4);background:rgba(232,160,32,.07)}
@@ -623,7 +630,7 @@ input,select,textarea,button{font-family:inherit}
 ══════════════════════════════════════════════ */
 #mobileNav{
   display:none;
-  position:fixed;bottom:0;left:0;right:0;z-index:300;
+  position:fixed;bottom:0;left:0;right:0;z-index:150;
   background:var(--sur);
   border-top:1px solid var(--bor);
   padding:6px 0 env(safe-area-inset-bottom,6px);
@@ -654,12 +661,14 @@ input,select,textarea,button{font-family:inherit}
 ══════════════════════════════════════════════ */
 #mobileHeader{
   display:none;
-  position:sticky;top:0;z-index:200;
+  position:sticky;top:0;z-index:150;
   background:var(--sur);
   border-bottom:1px solid var(--bor);
   flex-direction:column;
   padding:0;
   gap:0;
+  /* Creates stacking context so content below doesn't bleed through */
+  isolation:isolate;
 }
 .mob-header-title{font-size:17px;font-weight:800;letter-spacing:-.4px;flex:1}
 .mob-header-right{display:flex;align-items:center;gap:8px}
@@ -677,8 +686,9 @@ input,select,textarea,button{font-family:inherit}
 ══════════════════════════════════════════════ */
 #sbOverlay{
   display:none;position:fixed;inset:0;
-  background:rgba(0,0,0,.6);z-index:98;
-  backdrop-filter:blur(2px);
+  background:rgba(0,0,0,.65);z-index:350;
+  backdrop-filter:blur(3px);
+  -webkit-backdrop-filter:blur(3px);
 }
 #sbOverlay.show{display:block}
 .sb.mob-open{transform:translateX(0)!important}
@@ -688,7 +698,7 @@ input,select,textarea,button{font-family:inherit}
 ══════════════════════════════════════════════ */
 @media(max-width:768px){
   /* Show mobile UI, hide desktop UI */
-  .sb{transform:translateX(-100%);transition:transform .28s cubic-bezier(.4,0,.2,1);z-index:99}
+  .sb{transform:translateX(-100%);transition:transform .28s cubic-bezier(.4,0,.2,1);z-index:400}
   .main-wrap{margin-left:0}
   .topbar{display:none}
   /* Hide the desktop punch bar — mobile uses #mobPunchRow inside header */
@@ -699,6 +709,7 @@ input,select,textarea,button{font-family:inherit}
   #mobileHeader>div:first-child{padding:10px 16px}
 
   /* Content padding adjusts for bottom nav */
+  /* Note: no top padding offset needed — mobileHeader is sticky (not fixed) so content flows below it */
   .con{padding:14px 14px 80px;padding-bottom:calc(70px + env(safe-area-inset-bottom,0px))}
 
   /* Grids collapse on mobile */
@@ -738,6 +749,11 @@ input,select,textarea,button{font-family:inherit}
   #dashMap,#trackMap{height:260px}
   #visitMap{height:320px}
   #spVisitMap{height:300px}
+  /* Prevent Leaflet z-index from bleeding over sidebar */
+  #trackMap,#dashMap,#visitMap,#spVisitMap{
+    position:relative;
+    z-index:0;
+  }
 
   /* Order items grid */
   .oir{grid-template-columns:1fr 1fr;gap:8px}
@@ -754,6 +770,15 @@ input,select,textarea,button{font-family:inherit}
 
   /* SP page header counts */
   .sp-header-count{display:none}
+
+  /* Attendance grid — stack on mobile */
+  .att-grid{grid-template-columns:1fr!important}
+
+  /* Attendance summary stats inline 2x2 */
+  .att-grid .card:first-child .trow{gap:12px}
+
+  /* Tab top action button size */
+  #mobTopAction .btn{font-size:11px;padding:6px 10px}
 }
 
 @media(max-width:480px){
@@ -761,6 +786,19 @@ input,select,textarea,button{font-family:inherit}
   .con{padding:12px 12px 80px;padding-bottom:calc(70px + env(safe-area-inset-bottom,0px))}
   .card{padding:12px}
   .sc-v{font-size:22px}
+
+  /* Attendance calendar — tighter on small screens */
+  .acal{gap:2px}
+  .aday{padding:4px 1px;border-radius:5px}
+  .adn{font-size:11px}
+  /* Attendance day header labels */
+  .acal-head div{font-size:9px!important;padding:0!important}
+
+  /* Attendance grid — stack summary above calendar */
+  .att-grid{grid-template-columns:1fr!important;gap:12px}
+
+  /* Table overflow hint */
+  .tw{-webkit-overflow-scrolling:touch}
 }
 </style>
 <style>
@@ -801,7 +839,8 @@ input,select,textarea,button{font-family:inherit}
     </button>
     <div class="mob-header-title" id="mobTitle">Dashboard</div>
     <div class="mob-header-right">
-      <div class="mob-icon-btn" onclick="toggleND()" id="mobBell">
+      <div id="mobTopAction" style="display:none"></div>
+      <div class="mob-icon-btn" onclick="toggleND()" id="mobBell" style="position:relative">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
         <div class="mob-tab-badge" id="mobBellBadge" style="display:none">0</div>
       </div>
@@ -2508,7 +2547,41 @@ function go(name,el){
   closeMobileSidebar();
   document.getElementById('ndrop').classList.remove('open');
   document.getElementById('pageContent').innerHTML='<div style="text-align:center;padding:40px;color:var(--mut)"><div style="margin-bottom:10px;opacity:.4"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23,4 23,10 17,10"/><polyline points="1,20 1,14 7,14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg></div>Loading...</div>';
+  // Clear mobile action button while loading
+  const mta=document.getElementById('mobTopAction');
+  if(mta){ mta.innerHTML=''; mta.style.display='none'; }
   setTimeout(()=>renderPage(name),30);
+}
+
+// After renderPage runs, sync the primary action button to mobile header
+function syncMobileActions(){
+  if(!IS_MOBILE()) return;
+  const ta = document.getElementById('topActions');
+  const mta = document.getElementById('mobTopAction');
+  if(!mta) return;
+  if(!ta || !ta.innerHTML.trim()){
+    mta.innerHTML = '';
+    mta.style.display = 'none';
+    return;
+  }
+  // Find the first primary action button
+  const primaryBtn = ta.querySelector('.btn-gold, .btn-grn, .btn-blue');
+  if(primaryBtn){
+    const clone = primaryBtn.cloneNode(true);
+    // Compact style for mobile header
+    clone.style.cssText = 'padding:6px 12px;font-size:12px;font-weight:700;white-space:nowrap;border-radius:8px;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:5px;max-width:140px;overflow:hidden;text-overflow:ellipsis';
+    // Copy background/color from original
+    const computed = window.getComputedStyle(primaryBtn);
+    clone.style.background = primaryBtn.style.background || computed.background;
+    clone.style.color = primaryBtn.style.color || computed.color;
+    mta.innerHTML = '';
+    mta.appendChild(clone);
+    mta.style.display = 'flex';
+    mta.style.alignItems = 'center';
+  } else {
+    mta.innerHTML = '';
+    mta.style.display = 'none';
+  }
 }
 
 function renderPage(name){
@@ -3682,28 +3755,45 @@ function renderAttPage(pc){
   const monthNames=['January','February','March','April','May','June','July','August','September','October','November','December'];
   const calTitle=monthNames[now.getMonth()]+' '+now.getFullYear();
   pc.innerHTML=`
-    <div style="display:grid;grid-template-columns:220px 1fr;gap:14px">
+    <div class="att-grid" style="display:grid;grid-template-columns:220px 1fr;gap:14px">
       <div class="card">
-        <div class="card-h"><span class="card-t">📊 Summary</span></div>
-        <div style="display:flex;flex-direction:column;gap:9px;margin-top:4px">
-          <div class="trow"><div class="tdot" style="background:var(--grn)"></div><div style="flex:1;font-size:13px;font-weight:600">Present Days</div><div style="font-family:'Plus Jakarta Sans',sans-serif;font-size:22px;font-weight:700;color:var(--grn)">${presentDays}</div></div>
-          <div class="trow"><div class="tdot" style="background:var(--red)"></div><div style="flex:1;font-size:13px;font-weight:600">Absent Days</div><div style="font-family:'Plus Jakarta Sans',sans-serif;font-size:22px;font-weight:700;color:var(--red)">${absentDays}</div></div>
-          <div class="trow"><div class="tdot" style="background:var(--acc)"></div><div style="flex:1;font-size:13px;font-weight:600">Total Orders</div><div style="font-family:'Plus Jakarta Sans',sans-serif;font-size:22px;font-weight:700;color:var(--acc)">${sp.orders||0}</div></div>
-          <div class="trow" style="border:none"><div class="tdot" style="background:var(--pur)"></div><div style="flex:1;font-size:13px;font-weight:600">Total Visits</div><div style="font-family:'Plus Jakarta Sans',sans-serif;font-size:22px;font-weight:700;color:var(--pur)">${sp.visits||0}</div></div>
+        <div class="card-h"><span class="card-t">Summary</span></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px">
+          <div style="background:var(--sur2);border-radius:10px;padding:12px">
+            <div style="font-size:11px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.4px">Present</div>
+            <div style="font-size:28px;font-weight:800;color:var(--grn);letter-spacing:-1px;line-height:1.1;margin-top:4px">${presentDays}</div>
+            <div style="font-size:10px;color:var(--mut);margin-top:2px">days this month</div>
+          </div>
+          <div style="background:var(--sur2);border-radius:10px;padding:12px">
+            <div style="font-size:11px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.4px">Absent</div>
+            <div style="font-size:28px;font-weight:800;color:var(--red);letter-spacing:-1px;line-height:1.1;margin-top:4px">${absentDays}</div>
+            <div style="font-size:10px;color:var(--mut);margin-top:2px">days this month</div>
+          </div>
+          <div style="background:var(--sur2);border-radius:10px;padding:12px">
+            <div style="font-size:11px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.4px">Orders</div>
+            <div style="font-size:28px;font-weight:800;color:var(--acc);letter-spacing:-1px;line-height:1.1;margin-top:4px">${sp.orders||0}</div>
+            <div style="font-size:10px;color:var(--mut);margin-top:2px">total placed</div>
+          </div>
+          <div style="background:var(--sur2);border-radius:10px;padding:12px">
+            <div style="font-size:11px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.4px">Visits</div>
+            <div style="font-size:28px;font-weight:800;color:var(--pur);letter-spacing:-1px;line-height:1.1;margin-top:4px">${sp.visits||0}</div>
+            <div style="font-size:10px;color:var(--mut);margin-top:2px">check-ins done</div>
+          </div>
         </div>
       </div>
       <div class="card">
         <div class="card-h"><span class="card-t">${calTitle} — ${sp.name||'Admin'}</span></div>
-        <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px;margin-bottom:6px">
-          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600">Sun</div>
-          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600">Mon</div>
-          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600">Tue</div>
-          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600">Wed</div>
-          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600">Thu</div>
-          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600">Fri</div>
-          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600">Sat</div>
+        <div class="acal-head" style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:3px;margin-bottom:6px">
+          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600;padding:2px 0">S</div>
+          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600;padding:2px 0">M</div>
+          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600;padding:2px 0">T</div>
+          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600;padding:2px 0">W</div>
+          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600;padding:2px 0">T</div>
+          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600;padding:2px 0">F</div>
+          <div style="text-align:center;font-size:10px;color:var(--mut);font-weight:600;padding:2px 0">S</div>
         </div>
-        <div class="acal">${buildCal(uid)}</div>
+        <div class="acal" style="grid-template-columns:repeat(7,minmax(0,1fr))">${buildCal(uid)}</div>
+        </div></div>
         <div style="display:flex;gap:12px;margin-top:10px;font-size:11px">
           <span><span style="color:var(--grn)">■</span> Present</span>
           <span><span style="color:var(--red)">■</span> Absent</span>
