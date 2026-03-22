@@ -763,6 +763,29 @@ input,select,textarea,button{font-family:inherit}
   .sc-v{font-size:22px}
 }
 </style>
+<style>
+/* Hide login screen immediately if session token exists — prevents flash */
+#loginScreen.pre-hidden{display:none!important}
+</style>
+<script>
+// Runs synchronously before DOM renders — no flash
+(function(){
+  try{
+    const s=localStorage.getItem('dcrm_persist');
+    if(s){
+      const p=JSON.parse(s);
+      if(p&&p.id&&p.role&&p.ts){
+        // Session token exists — hide login screen immediately
+        // Will be verified async by tryRestoreSession()
+        document.addEventListener('DOMContentLoaded',function(){
+          const ls=document.getElementById('loginScreen');
+          if(ls) ls.classList.add('pre-hidden');
+        });
+      }
+    }
+  }catch(e){}
+})();
+</script>
 </head>
 <body>
 
@@ -2197,7 +2220,7 @@ async function doLogin(){
       }catch(e){}
     }
     curUser={id:sp.id,name:sp.name,role:'sales'};
-    saveSession();
+    saveSession(); // Save immediately — no pin yet, but user is authenticated
     err.style.display='none';
     document.getElementById('loginScreen').style.display='none';
     document.getElementById('punchScreen').classList.add('visible');
@@ -2224,7 +2247,7 @@ async function doLogin(){
 }
 
 function doLogout(){
-  if(!confirm('Are you sure you want to logout?'))return;
+  if(!confirm('Are you sure you want to sign out?'))return;
   clearSession();
   clearInterval(wInt);
   curUser=null; pinTime=null;
@@ -2347,7 +2370,7 @@ function doPunchIn(){
 }
 
 function doPunchOut(){
-  if(!confirm('Are you sure you want to Punch Out?'))return;
+  if(!confirm('Punch out and end your work session?'))return;
   clearInterval(wInt);
   // Mark SP as checked out
   const sp = spList.find(s => s.id === curUser?.id);
@@ -2355,6 +2378,16 @@ function doPunchOut(){
   document.getElementById('punchbar').classList.remove('show');
   const mpr2 = document.getElementById('mobPunchRow');
   if(mpr2) mpr2.classList.remove('show');
+  // Clear pinTime from localStorage but keep user session
+  // (they stay logged in — punch screen shows to punch in again next time)
+  const savedRole = curUser?.role;
+  const savedId = curUser?.id;
+  const savedName = curUser?.name;
+  try{
+    const s = JSON.parse(localStorage.getItem('dcrm_persist')||'{}');
+    delete s.pin; // remove punch time only
+    localStorage.setItem('dcrm_persist', JSON.stringify(s));
+  }catch(e){}
   document.getElementById('app').classList.remove('show');
   document.getElementById('punchScreen').classList.add('visible');
   broadcastPunch('out');
@@ -4518,64 +4551,141 @@ function toast(msg,col){
 // SESSION PERSISTENCE — survives page refresh, clears on close
 // ============================================================
 function saveSession(pinISO){
-  const s={id:curUser.id,name:curUser.name,role:curUser.role};
+  const s={
+    id:curUser.id,
+    name:curUser.name,
+    role:curUser.role,
+    ts:Date.now() // timestamp to detect very old stale sessions
+  };
   if(pinISO) s.pin=pinISO;
   else if(pinTime) s.pin=pinTime.toISOString();
-  sessionStorage.setItem('dcrm_sess',JSON.stringify(s));
+  // Use localStorage (survives mobile refresh, tab close, browser restart)
+  // Session is only cleared by explicit logout or clearSession()
+  try{ localStorage.setItem('dcrm_persist',JSON.stringify(s)); }catch(e){}
 }
-function clearSession(){ sessionStorage.removeItem('dcrm_sess'); }
+function clearSession(){
+  try{ localStorage.removeItem('dcrm_persist'); }catch(e){}
+  // Also clear old sessionStorage format if present
+  try{ sessionStorage.removeItem('dcrm_sess'); }catch(e){}
+}
 
 async function tryRestoreSession(){
-  const raw=sessionStorage.getItem('dcrm_sess');
+  // Read from localStorage (works on mobile, survives refresh + tab close)
+  let raw = null;
+  try{ raw = localStorage.getItem('dcrm_persist'); }catch(e){}
+  if(!raw){
+    // Fallback: check old sessionStorage format (migration)
+    try{ raw = sessionStorage.getItem('dcrm_sess'); }catch(e){}
+  }
   if(!raw) return false;
+
   try{
-    const s=JSON.parse(raw);
-    if(!s||!s.id||!s.role) return false;
-    // Init Supabase first so spList is populated
-    initSupabase();
-    await loadFromSupabase(true); // silent=true: no banner or toast on refresh restore
-    // Verify user still exists and is active
-    if(s.role==='admin'){
-      curUser={id:'admin',name:'Admin',role:'admin'};
-    } else if(s.role==='sales'){
-      const sp=spList.find(x=>x.id===s.id&&x.status==='active');
-      if(!sp){ clearSession(); return false; }
-      curUser={id:sp.id,name:sp.name,role:'sales'};
-    } else if(s.role==='dispatch'){
-      const dp=dispatchList.find(x=>x.id===s.id&&x.status==='active');
-      if(!dp){ clearSession(); return false; }
-      curUser={id:dp.id,name:dp.name,role:'dispatch'};
-    } else { clearSession(); return false; }
-    // Restore punch state for sales
-    if(s.role==='sales' && s.pin){
-      pinTime=new Date(s.pin);
-      // Restore punch bar
-      const cinTime=pinTime.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+    const s = JSON.parse(raw);
+    if(!s || !s.id || !s.role) return false;
+
+    // STEP 1: Hide login screen immediately (before any async work)
+    // Removes the flash — user sees nothing until app is ready
+    const loginEl = document.getElementById('loginScreen');
+    if(loginEl){ loginEl.classList.add('pre-hidden'); loginEl.style.display='none'; }
+
+    // STEP 2: Load local data first (instant, no network needed)
+    // This lets us verify the user exists from cached data
+    lsLoad();
+    normalizeSpRoutes();
+
+    // STEP 3: Verify user identity from local cache first
+    if(s.role === 'admin'){
+      curUser = {id:'admin', name:'Admin', role:'admin'};
+    } else if(s.role === 'sales'){
+      // Try local cache first, then Supabase
+      let sp = spList.find(x => x.id === s.id && x.status === 'active');
+      if(!sp){
+        // Not in cache — try Supabase
+        initSupabase();
+        await loadFromSupabase(true);
+        sp = spList.find(x => x.id === s.id && x.status === 'active');
+      }
+      if(!sp){
+        // User no longer exists or deactivated
+        clearSession();
+        if(loginEl){ loginEl.classList.remove('pre-hidden'); loginEl.style.display='flex'; }
+        return false;
+      }
+      curUser = {id:sp.id, name:sp.name, role:'sales'};
+    } else if(s.role === 'dispatch'){
+      let dp = dispatchList.find(x => x.id === s.id && x.status === 'active');
+      if(!dp){
+        initSupabase();
+        await loadFromSupabase(true);
+        dp = dispatchList.find(x => x.id === s.id && x.status === 'active');
+      }
+      if(!dp){
+        clearSession();
+        if(loginEl){ loginEl.classList.remove('pre-hidden'); loginEl.style.display='flex'; }
+        return false;
+      }
+      curUser = {id:dp.id, name:dp.name, role:'dispatch'};
+    } else {
+      clearSession();
+      if(loginEl){ loginEl.classList.remove('pre-hidden'); loginEl.style.display='flex'; }
+      return false;
+    }
+
+    // STEP 4: Restore punch state (for sales only)
+    // pinTime comes from localStorage — this is the real source of truth
+    if(s.role === 'sales' && s.pin){
+      pinTime = new Date(s.pin);
+      const cinTime = pinTime.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+
+      // Desktop punch bar
       document.getElementById('punchbar').classList.add('show');
-      document.getElementById('pbName').textContent=curUser.name+' — Punched In';
-      document.getElementById('pbSub').textContent='Restored · '+cinTime;
+      document.getElementById('pbName').textContent = curUser.name + ' — Active';
+      document.getElementById('pbSub').textContent = 'Since ' + cinTime;
+
       // Mobile punch row
       const mprR = document.getElementById('mobPunchRow');
       if(mprR) mprR.classList.add('show');
       const mpnR = document.getElementById('mobPunchName');
       if(mpnR) mpnR.textContent = curUser.name;
       const mpsR = document.getElementById('mobPunchSub');
-      if(mpsR) mpsR.textContent = 'Punched in · '+cinTime;
-      wInt=setInterval(()=>{
-        const d=Math.floor((new Date()-pinTime)/1000);
-        const ts=pad(Math.floor(d/3600))+':'+pad(Math.floor(d%3600/60))+':'+pad(d%60);
-        const wt=document.getElementById('wTimer'); if(wt) wt.textContent=ts;
-        const mt=document.getElementById('mobPunchTimer'); if(mt) mt.textContent=ts;
-      },1000);
+      if(mpsR) mpsR.textContent = 'Since ' + cinTime;
+
+      // Start working time timer
+      wInt = setInterval(() => {
+        const d = Math.floor((new Date() - pinTime) / 1000);
+        const ts = pad(Math.floor(d/3600))+':'+pad(Math.floor(d%3600/60))+':'+pad(d%60);
+        const wt = document.getElementById('wTimer'); if(wt) wt.textContent = ts;
+        const mt = document.getElementById('mobPunchTimer'); if(mt) mt.textContent = ts;
+      }, 1000);
+
       startLiveLocationPush();
-      // Resume GPS tracking after page refresh (already have permission from before)
-      startGPS();
+      startGPS(); // Resume GPS — permission already granted
     }
-    // Show app immediately — don't make user watch loading screen
-    document.getElementById('loginScreen').style.display='none';
+
+    // STEP 5: Start app (show dashboard immediately from local data)
+    // For sales role: if no pin (not punched in), show punch screen
+    if(s.role === 'sales' && !s.pin){
+      // Show punch screen — user needs to punch in for the day
+      document.getElementById('punchScreen').classList.add('visible');
+      document.getElementById('psUserName').textContent = curUser.name;
+      const sp2 = spList.find(x=>x.id===curUser.id);
+      document.getElementById('psUserRole').textContent = 'Sales Executive' + (sp2?.zone ? ' — '+sp2.zone : '');
+      // Don't call startApp yet — wait for punch-in
+      return true;
+    }
     startApp();
+
+    // STEP 6: Silently refresh from Supabase in background
+    // (don't block — user sees dashboard instantly from cache)
+    if(!supaReady){ initSupabase(); }
+    loadFromSupabase(true).catch(()=>{});
+
     return true;
-  }catch(e){ clearSession(); return false; }
+  } catch(e){
+    console.warn('Session restore failed:', e);
+    clearSession();
+    return false;
+  }
 }
 
 // ============================================================
