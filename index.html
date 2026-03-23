@@ -2425,36 +2425,22 @@ function doPunchIn(){
 function doPunchOut(){
   if(!confirm('Punch out and end your work session?'))return;
   clearInterval(wInt);
-  // Mark SP as checked out
-  const sp = spList.find(s => s.id === curUser?.id);
-  if(sp){ sp.checkedIn = false; sbSaveSP(sp); saveData(); }
-  document.getElementById('punchbar').classList.remove('show');
-  const mpr2 = document.getElementById('mobPunchRow');
-  if(mpr2) mpr2.classList.remove('show');
-  // Clear pinTime from localStorage but keep user session
-  // (they stay logged in — punch screen shows to punch in again next time)
-  const savedRole = curUser?.role;
-  const savedId = curUser?.id;
-  const savedName = curUser?.name;
-  try{
-    const s = JSON.parse(localStorage.getItem('dcrm_persist')||'{}');
-    delete s.pin; // remove punch time only
-    localStorage.setItem('dcrm_persist', JSON.stringify(s));
-  }catch(e){}
-  document.getElementById('app').classList.remove('show');
-  document.getElementById('punchScreen').classList.add('visible');
-  stopLiveLocationPush();
-  // Punch-out notification — channel is always ready here (app was fully loaded)
-  const outTime=new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+
+  // ── STEP 1: Capture all state BEFORE any cleanup ──
   const spIdOut = curUser?.id;
   const spNameOut = curUser?.name;
+  const outTime = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+  const sp = spList.find(s => s.id === spIdOut);
+
+  // ── STEP 2: Send notifications FIRST, before touching UI or channel ──
+  // Broadcast to admin in real-time
   if(supaReady && realtimeChannel && spIdOut){
     realtimeChannel.send({
       type:'broadcast', event:'punch',
       payload:{id:spIdOut, name:spNameOut, action:'out', time:outTime}
     });
   }
-  // DB fallback for admins who connect later
+  // DB INSERT fallback — fires postgres_changes for admins who missed broadcast
   if(supaReady && spIdOut){
     const evId2 = spIdOut+'_ev_'+Date.now();
     sb.from('sp_locations').insert({
@@ -2465,11 +2451,36 @@ function doPunchOut(){
       updated_at:new Date().toISOString()
     }).then(()=>{ setTimeout(()=>sbDelete('sp_locations',evId2),60000); }).catch(()=>{});
   }
-  if(visitMap){visitMap.remove();visitMap=null;}
-  if(tMap){tMap.remove();tMap=null;}
-  tMapLiveDot = null;
-  pinTime = null;
-  toast('👋 Punched Out. See you tomorrow!','var(--acc)');
+
+  // ── STEP 3: Update local state ──
+  if(sp){ sp.checkedIn = false; sbSaveSP(sp); saveData(); }
+
+  // ── STEP 4: Update UI ──
+  document.getElementById('punchbar').classList.remove('show');
+  const mpr2 = document.getElementById('mobPunchRow');
+  if(mpr2) mpr2.classList.remove('show');
+
+  // ── STEP 5: Save session (keep user logged in, remove pin) ──
+  try{
+    const sess = JSON.parse(localStorage.getItem('dcrm_persist')||'{}');
+    delete sess.pin;
+    localStorage.setItem('dcrm_persist', JSON.stringify(sess));
+  }catch(e){}
+
+  // ── STEP 6: Stop GPS and location push (after notifications sent) ──
+  stopLiveLocationPush();
+
+  // ── STEP 7: Show punch screen (after notifications sent so UI hide doesn't abort WS send) ──
+  setTimeout(()=>{
+    document.getElementById('app').classList.remove('show');
+    document.getElementById('punchScreen').classList.add('visible');
+    if(visitMap){visitMap.remove();visitMap=null;}
+    if(tMap){tMap.remove();tMap=null;}
+    tMapLiveDot = null;
+    pinTime = null;
+  }, 300); // 300ms delay — gives WebSocket time to flush before app hides
+
+  toast('Punched Out. See you tomorrow!','var(--acc)');
 }
 
 function pad(n){return String(n).padStart(2,'0');}
