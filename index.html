@@ -2378,34 +2378,48 @@ function doPunchIn(){
   }, 1000);
 
   // Always start GPS on punch-in — this is a user gesture so mobile shows dialog
-  // If already running, startGPS() returns early (gpsWatcher !== null guard)
   startGPS();
-
-  // Start pushing live location to Supabase every 30s
-  // Note: the GPS watchPosition handler also calls pushLiveLocation() on each GPS fix
-  // so the first push happens as soon as GPS lock is acquired
   startLiveLocationPush();
-  // Broadcast punch-in immediately (instant — no DB latency)
-  broadcastPunch('in');
+
+  // Start app FIRST so Supabase channel gets established
   startApp();
-  // Also write to DB for persistence (in case admin reconnects later)
-  // INSERT always fires realtime; UPDATE may be missed if admin just connected
-  setTimeout(()=>{
-    if(!supaReady) return;
-    const cinTime2=new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
-    const evId = curUser.id+'_ev_'+Date.now(); // unique ID = always INSERT
-    sb.from('sp_locations').insert({
-      id:evId, sp_name:curUser.name,
-      lat:myLat||null, lng:myLng||null, accuracy:0,
-      checked_in:true, cin:cinTime2,
-      route:'[]', visits:0, km:'0 km',
-      updated_at:new Date().toISOString()
-    }).then(()=>{
-      // Delete after 30s to keep table clean
-      setTimeout(()=>sbDelete('sp_locations',evId),30000);
-    }).catch(()=>{});
-  }, 1500);
-  toast('✅ Punched In! Have a productive day.');
+
+  // Notify admin — try broadcast first, then DB fallback
+  // Retry loop: wait for channel to be subscribed (can take 500-2000ms)
+  const punchInTime = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+  const spId = curUser.id;
+  const spName = curUser.name;
+
+  function attemptPunchNotify(attemptsLeft){
+    if(attemptsLeft <= 0){
+      // Final fallback: write to DB (admin will see on next load)
+      console.warn('Punch-in broadcast failed after retries — falling back to DB');
+      return;
+    }
+    if(supaReady && realtimeChannel){
+      // Channel ready — send broadcast
+      realtimeChannel.send({
+        type:'broadcast', event:'punch',
+        payload:{id:spId, name:spName, action:'in', time:punchInTime}
+      });
+      // Also write to DB for persistence (catches admins who connect later)
+      const evId = spId+'_ev_'+Date.now();
+      sb.from('sp_locations').insert({
+        id:evId, sp_name:spName,
+        lat:myLat||null, lng:myLng||null, accuracy:0,
+        checked_in:true, cin:punchInTime,
+        route:'[]', visits:0, km:'0 km',
+        updated_at:new Date().toISOString()
+      }).then(()=>{ setTimeout(()=>sbDelete('sp_locations',evId),60000); }).catch(()=>{});
+    } else {
+      // Channel not ready yet — retry in 500ms
+      setTimeout(()=>attemptPunchNotify(attemptsLeft-1), 500);
+    }
+  }
+  // Start retrying after 400ms (gives startApp time to init Supabase)
+  setTimeout(()=>attemptPunchNotify(10), 400);
+
+  toast('Punched In! Have a productive day.');
 }
 
 function doPunchOut(){
@@ -2429,19 +2443,27 @@ function doPunchOut(){
   }catch(e){}
   document.getElementById('app').classList.remove('show');
   document.getElementById('punchScreen').classList.add('visible');
-  broadcastPunch('out');
   stopLiveLocationPush();
-  // Also write to DB for persistence
-  if(supaReady && curUser){
-    const outTime=new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
-    const evId2 = curUser.id+'_ev_'+Date.now();
+  // Punch-out notification — channel is always ready here (app was fully loaded)
+  const outTime=new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+  const spIdOut = curUser?.id;
+  const spNameOut = curUser?.name;
+  if(supaReady && realtimeChannel && spIdOut){
+    realtimeChannel.send({
+      type:'broadcast', event:'punch',
+      payload:{id:spIdOut, name:spNameOut, action:'out', time:outTime}
+    });
+  }
+  // DB fallback for admins who connect later
+  if(supaReady && spIdOut){
+    const evId2 = spIdOut+'_ev_'+Date.now();
     sb.from('sp_locations').insert({
-      id:evId2, sp_name:curUser.name,
+      id:evId2, sp_name:spNameOut||'',
       lat:myLat||null, lng:myLng||null, accuracy:0,
       checked_in:false, cin:outTime,
       route:'[]', visits:0, km:'0 km',
       updated_at:new Date().toISOString()
-    }).then(()=>{ setTimeout(()=>sbDelete('sp_locations',evId2),30000); }).catch(()=>{});
+    }).then(()=>{ setTimeout(()=>sbDelete('sp_locations',evId2),60000); }).catch(()=>{});
   }
   if(visitMap){visitMap.remove();visitMap=null;}
   if(tMap){tMap.remove();tMap=null;}
@@ -4115,7 +4137,11 @@ function renderSPMapPage(pc,ta){
     <select id="spmapSP" onchange="refreshSPMap()" style="padding:7px 12px;font-size:12px;background:var(--sur2);border:1px solid var(--bor);color:var(--txt);border-radius:8px;outline:none">
       <option value="all">All Salespersons</option>
       ${spList.map((s,i)=>`<option value="${i}">${s.name}</option>`).join('')}
-    </select>`;
+    </select>
+    <button class="btn btn-out" onclick="clearSPRoute()" style="margin-left:6px">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3,6 5,6 21,6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
+      Clear Route
+    </button>`;
 
   pc.innerHTML=`
     <div class="card" style="margin-bottom:14px">
@@ -4130,20 +4156,73 @@ function renderSPMapPage(pc,ta){
     <div class="card">
       <div class="card-h"><span class="card-t">📋 Visit Summary</span></div>
       <div class="tw">
-        <table><thead><tr><th>#</th><th>Salesperson</th><th>Zone</th><th>Check-in</th><th>Visits</th><th>KM</th><th>Orders</th><th>Status</th></tr></thead>
+        <table><thead><tr><th>#</th><th>Salesperson</th><th>Zone</th><th>Check-in</th><th>Visits</th><th>KM</th><th>Orders</th><th>Status</th><th>Route</th></tr></thead>
         <tbody>${spList.map((s,i)=>`<tr>
-          <td><span style="width:24px;height:24px;border-radius:50%;background:${C[i]};color:#000;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:11px">${i+1}</span></td>
+          <td><span style="width:24px;height:24px;border-radius:50%;background:${C[i%C.length]};color:#000;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:11px">${i+1}</span></td>
           <td><b>${s.name}</b></td><td>${s.zone}</td>
           <td>${s.cin||'—'}</td>
           <td><b style="color:var(--blue)">${s.visits}</b></td>
           <td>${s.km||'0 km'}</td>
           <td><b style="color:var(--acc)">${s.orders}</b></td>
           <td><span class="badge ${s.checkedIn?'b-grn':'b-red'}">${s.checkedIn?'● Active':'● Offline'}</span></td>
+          <td><button class="btn btn-out" style="padding:4px 9px;font-size:11px" onclick="document.getElementById('spmapSP').value='${i}';clearSPRoute()">Clear</button></td>
         </tr>`).join('')}
         </tbody></table>
       </div>
     </div>`;
   setTimeout(()=>initSPVisitMap(),80);
+}
+
+// Clear route history for selected SP (or all SPs)
+async function clearSPRoute(){
+  const fv = document.getElementById('spmapSP')?.value || 'all';
+  const offLat = officeLat || 20.5937;
+  const offLng = officeLng || 78.9629;
+  const emptyRoute = [{lat:offLat, lng:offLng, lbl:officeName||'Office', t:'start', tm:'—'}];
+
+  if(fv === 'all'){
+    if(!confirm(`Clear today's route history for ALL salespersons? This cannot be undone.`)) return;
+    spList.forEach(sp => { sp.route = [...emptyRoute]; sp.visits = 0; sp.km = '0 km'; });
+  } else {
+    const sp = spList[+fv];
+    if(!sp) return;
+    if(!confirm(`Clear today's route history for ${sp.name}? This cannot be undone.`)) return;
+    sp.route = [...emptyRoute];
+    sp.visits = 0;
+    sp.km = '0 km';
+  }
+
+  // Save locally
+  saveData();
+
+  // Update Supabase sp_locations for affected SPs
+  const toUpdate = fv === 'all' ? spList : [spList[+fv]].filter(Boolean);
+  for(const sp of toUpdate){
+    if(supaReady){
+      await sbUpsert('sp_locations', {
+        id: sp.id,
+        sp_name: sp.name,
+        lat: sp.liveLat || null,
+        lng: sp.liveLng || null,
+        accuracy: 0,
+        checked_in: sp.checkedIn || false,
+        cin: sp.cin || '—',
+        route: JSON.stringify(sp.route),
+        visits: 0,
+        km: '0 km',
+        updated_at: new Date().toISOString()
+      }).catch(() => {});
+      // Also update salespersons table
+      sbSaveSP(sp);
+    }
+  }
+
+  toast('Route history cleared.');
+  refreshSPMap();
+  renderSPMapPage(
+    document.getElementById('pageContent'),
+    document.getElementById('topActions')
+  );
 }
 
 let spvMap=null, spvL=[];
