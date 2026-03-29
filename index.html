@@ -483,6 +483,27 @@ input,select,textarea,button{font-family:inherit}
 #trackMap{height:440px;width:100%;border-radius:var(--r);border:1px solid var(--bor)}
 #visitMap{height:460px;border-radius:var(--r);border:1px solid var(--bor)}
 #spVisitMap{height:480px;width:100%;border-radius:var(--r);border:1px solid var(--bor)}
+
+/* Locate Me button — floats inside map container */
+.locate-btn{
+  position:absolute;bottom:14px;right:14px;z-index:1000;
+  background:var(--sur);border:1px solid var(--bor2);
+  color:var(--txt);border-radius:10px;
+  padding:8px 13px;font-size:12px;font-weight:700;
+  cursor:pointer;display:flex;align-items:center;gap:7px;
+  box-shadow:0 3px 12px rgba(0,0,0,.45);
+  font-family:'Plus Jakarta Sans',sans-serif;
+  transition:all .15s;letter-spacing:.1px;
+  white-space:nowrap;
+}
+.locate-btn:hover{background:var(--sur3);border-color:var(--acc);color:var(--acc)}
+.locate-btn:active{transform:scale(.96)}
+.locate-btn.locating{color:var(--acc);border-color:var(--acc);background:rgba(232,160,32,.08)}
+.locate-btn svg{flex-shrink:0;transition:transform .3s}
+.locate-btn.locating svg{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+/* Map wrapper needs position:relative for button to anchor inside */
+.map-wrap{position:relative;border-radius:var(--r);overflow:hidden}
 .leaflet-container{background:#080c14!important}
 .leaflet-pane,.leaflet-tile-pane,.leaflet-map-pane{z-index:1!important}
 .leaflet-control-container{z-index:2!important}
@@ -1597,7 +1618,14 @@ async function sbDelete(table,id){ const {error}=await sb.from(table).delete().e
 function saveData(){ lsSave(); /* Supabase writes happen via specific save functions below */ }
 
 // ---------- Push single record to Supabase ----------
-async function sbSaveCustomer(cust){ if(!supaReady)return; const row={id:String(cust.id),name:cust.name,gst:cust.gst||'',mob:cust.mob,contact:cust.con||'',city:cust.city||'',state:cust.state||'',addr:cust.addr||'',type:cust.type||'Retailer',sp_id:cust.spId||'admin',sp_name:cust.spName||'Admin',lat:cust.lat||null,lng:cust.lng||null}; await sbUpsert('customers',row); }
+async function sbSaveCustomer(cust,retries=3){
+  if(!supaReady) return;
+  const row={id:String(cust.id),name:cust.name,gst:cust.gst||'',mob:cust.mob,contact:cust.con||'',city:cust.city||'',state:cust.state||'',addr:cust.addr||'',type:cust.type||'Retailer',sp_id:cust.spId||'admin',sp_name:cust.spName||'Admin',lat:cust.lat||null,lng:cust.lng||null};
+  for(let i=0;i<retries;i++){
+    try{ await sbUpsert('customers',row); return; }
+    catch(e){ if(i<retries-1) await new Promise(r=>setTimeout(r,600)); else console.error('sbSaveCustomer failed after retries',e); }
+  }
+}
 async function sbSaveOrder(o){ if(!supaReady)return; const row={id:o.id,cust_id:String(o.cid),cust_name:o.custName,cust_mob:o.custMob,sp_id:o.spId,sp_name:o.spName,date:o.date,delivery_date:o.ddate||'',items:JSON.stringify(o.items),total:o.total,payment:o.pay,priority:o.pri,notes:o.notes||'',status:o.status,dispatch:o.disp?JSON.stringify(o.disp):null,created_at:o.createdAt}; await sbUpsert('orders',row); }
 async function sbSaveProduct(p){ if(!supaReady)return; const row={id:String(p.id),name:p.name,code:p.code,category:p.cat,price:p.price,unit:p.unit,sizes:p.sizes||'',hsn:p.hsn||'',description:p.desc||''}; await sbUpsert('products',row); }
 async function sbSaveExpense(e){ if(!supaReady)return; const row={id:String(e.id),sp_id:e.spId,sp_name:e.spName,category:e.cat,amount:e.amt,description:e.desc,date:e.date,mode:e.mode,party_id:e.partyId||null,party_name:e.partyName||'',files:JSON.stringify(e.files||[]),status:e.status,admin_note:e.adminNote||'',created_at:e.createdAt}; await sbUpsert('expenses',row); }
@@ -1612,7 +1640,14 @@ async function loadFromSupabase(silent=false){
       sbGet('customers'), sbGet('orders'), sbGet('products'),
       sbGet('salespersons'), sbGet('expenses')
     ]);
-    if(custs) customers=custs.map(r=>({id:r.id,name:r.name,gst:r.gst,mob:r.mob,con:r.contact,city:r.city,state:r.state,addr:r.addr,type:r.type,spId:r.sp_id,spName:r.sp_name,lat:r.lat||null,lng:r.lng||null}));
+    if(custs){
+      // Merge: start with Supabase data, then add any local customers not yet in DB
+      const fromDB = custs.map(r=>({id:r.id,name:r.name,gst:r.gst,mob:r.mob,con:r.contact,city:r.city,state:r.state,addr:r.addr,type:r.type,spId:r.sp_id,spName:r.sp_name,lat:r.lat||null,lng:r.lng||null}));
+      const dbIds = new Set(fromDB.map(c=>String(c.id)));
+      // Keep any local customers not yet in Supabase (just added, write in-flight)
+      const localOnly = customers.filter(c => !dbIds.has(String(c.id)));
+      customers = [...fromDB, ...localOnly];
+    }
     if(ords)  orders=ords.map(r=>({id:r.id,cid:r.cust_id,custName:r.cust_name,custMob:r.cust_mob,spId:r.sp_id,spName:r.sp_name,date:r.date,ddate:r.delivery_date,items:JSON.parse(r.items||'[]'),total:r.total,pay:r.payment,pri:r.priority,notes:r.notes,status:r.status,disp:r.dispatch?JSON.parse(r.dispatch):null,createdAt:r.created_at}));
     if(prods&&prods.length) products=prods.map(r=>({id:r.id,name:r.name,code:r.code,cat:r.category,price:r.price,unit:r.unit,sizes:r.sizes,hsn:r.hsn,desc:r.description}));
     if(sps&&sps.length){
@@ -1853,7 +1888,11 @@ function handleRealtimeLiveLocation(payload){
   sp.km = r.km || '0 km';
   if(r.lat) sp.liveLat = r.lat;
   if(r.lng) sp.liveLng = r.lng;
-  if(r.route){ try{ sp.route = JSON.parse(r.route); }catch(e){} }
+  if(r.route){ try{
+    const parsed = JSON.parse(r.route);
+    // Strip stale cur entries on load — they cause "undefined" in timeline
+    sp.route = parsed.filter(e => e.t !== 'cur');
+  }catch(e){} }
   normalizeSpRoutes();
   // Update attendance in real-time
   if(r.checked_in){
@@ -2069,7 +2108,7 @@ async function pushLiveLocation(){
     accuracy: 0,
     checked_in: true,
     cin: sp?.cin || new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}),
-    route: JSON.stringify(sp?.route || []),
+    route: JSON.stringify((sp?.route || []).filter(e => e.t !== 'cur')),
     visits: sp?.visits || 0,
     km: sp?.km || '0 km',
     updated_at: new Date().toISOString()
@@ -2174,7 +2213,11 @@ async function loadSpLiveLocations(){
       sp.km = r.km || '0 km';
       if(r.lat) sp.liveLat = r.lat;
       if(r.lng) sp.liveLng = r.lng;
-      if(r.route){ try{ sp.route = JSON.parse(r.route); } catch(e){} }
+      if(r.route){ try{
+        const parsed2 = JSON.parse(r.route);
+        // Strip stale cur entries — they show as "undefined" in route timeline
+        sp.route = parsed2.filter(e => e.t !== 'cur');
+      } catch(e){} }
       // Mark attendance based on live data (works on admin device too)
       if(r.checked_in){
         if(!att[r.id]) att[r.id]={};
@@ -2425,22 +2468,36 @@ function doPunchIn(){
 function doPunchOut(){
   if(!confirm('Punch out and end your work session?'))return;
   clearInterval(wInt);
-
-  // ── STEP 1: Capture all state BEFORE any cleanup ──
+  // Mark SP as checked out
+  const sp = spList.find(s => s.id === curUser?.id);
+  if(sp){ sp.checkedIn = false; sbSaveSP(sp); saveData(); }
+  document.getElementById('punchbar').classList.remove('show');
+  const mpr2 = document.getElementById('mobPunchRow');
+  if(mpr2) mpr2.classList.remove('show');
+  // Clear pinTime from localStorage but keep user session
+  // (they stay logged in — punch screen shows to punch in again next time)
+  const savedRole = curUser?.role;
+  const savedId = curUser?.id;
+  const savedName = curUser?.name;
+  try{
+    const s = JSON.parse(localStorage.getItem('dcrm_persist')||'{}');
+    delete s.pin; // remove punch time only
+    localStorage.setItem('dcrm_persist', JSON.stringify(s));
+  }catch(e){}
+  document.getElementById('app').classList.remove('show');
+  document.getElementById('punchScreen').classList.add('visible');
+  stopLiveLocationPush();
+  // Punch-out notification — channel is always ready here (app was fully loaded)
+  const outTime=new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
   const spIdOut = curUser?.id;
   const spNameOut = curUser?.name;
-  const outTime = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
-  const sp = spList.find(s => s.id === spIdOut);
-
-  // ── STEP 2: Send notifications FIRST, before touching UI or channel ──
-  // Broadcast to admin in real-time
   if(supaReady && realtimeChannel && spIdOut){
     realtimeChannel.send({
       type:'broadcast', event:'punch',
       payload:{id:spIdOut, name:spNameOut, action:'out', time:outTime}
     });
   }
-  // DB INSERT fallback — fires postgres_changes for admins who missed broadcast
+  // DB fallback for admins who connect later
   if(supaReady && spIdOut){
     const evId2 = spIdOut+'_ev_'+Date.now();
     sb.from('sp_locations').insert({
@@ -2451,36 +2508,11 @@ function doPunchOut(){
       updated_at:new Date().toISOString()
     }).then(()=>{ setTimeout(()=>sbDelete('sp_locations',evId2),60000); }).catch(()=>{});
   }
-
-  // ── STEP 3: Update local state ──
-  if(sp){ sp.checkedIn = false; sbSaveSP(sp); saveData(); }
-
-  // ── STEP 4: Update UI ──
-  document.getElementById('punchbar').classList.remove('show');
-  const mpr2 = document.getElementById('mobPunchRow');
-  if(mpr2) mpr2.classList.remove('show');
-
-  // ── STEP 5: Save session (keep user logged in, remove pin) ──
-  try{
-    const sess = JSON.parse(localStorage.getItem('dcrm_persist')||'{}');
-    delete sess.pin;
-    localStorage.setItem('dcrm_persist', JSON.stringify(sess));
-  }catch(e){}
-
-  // ── STEP 6: Stop GPS and location push (after notifications sent) ──
-  stopLiveLocationPush();
-
-  // ── STEP 7: Show punch screen (after notifications sent so UI hide doesn't abort WS send) ──
-  setTimeout(()=>{
-    document.getElementById('app').classList.remove('show');
-    document.getElementById('punchScreen').classList.add('visible');
-    if(visitMap){visitMap.remove();visitMap=null;}
-    if(tMap){tMap.remove();tMap=null;}
-    tMapLiveDot = null;
-    pinTime = null;
-  }, 300); // 300ms delay — gives WebSocket time to flush before app hides
-
-  toast('Punched Out. See you tomorrow!','var(--acc)');
+  if(visitMap){visitMap.remove();visitMap=null;}
+  if(tMap){tMap.remove();tMap=null;}
+  tMapLiveDot = null;
+  pinTime = null;
+  toast('👋 Punched Out. See you tomorrow!','var(--acc)');
 }
 
 function pad(n){return String(n).padStart(2,'0');}
@@ -3146,7 +3178,13 @@ function renderMapPage(pc){
           ${spList.map((s,i)=>`<option value="${i}">${s.name}</option>`).join('')}
         </select>
       </div>
-      <div id="dashMap"></div>
+      <div class="map-wrap">
+        <div id="dashMap"></div>
+        <button id="locBtn_dashMap" class="locate-btn" onclick="triggerLocate('dashMap')" title="Center map on your GPS location">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
+          <span class="locate-lbl">Locate Me</span>
+        </button>
+      </div>
       <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:9px;font-size:12px;color:var(--mut)">
         ${spList.map((s,i)=>`<span><span style="color:${C[i]}">●</span> ${s.name.split(' ')[0]}</span>`).join('')}
         <span style="margin-left:auto">📍 Visit &nbsp;🏠 Start &nbsp;➖ Route</span>
@@ -3174,12 +3212,37 @@ function renderMyMapPage(pc){
         <span class="card-t">📍 My Location &amp; Route</span>
         <span class="badge ${pinTime?'b-grn':'b-red'}">${pinTime?'● LIVE':'● Offline'}</span>
       </div>
-      <div id="trackMap"></div>
+      <div class="map-wrap">
+        <div id="trackMap"></div>
+        <button id="locBtn_trackMap" class="locate-btn" onclick="triggerLocate('trackMap')" title="Center map on your GPS location">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
+          <span class="locate-lbl">Locate Me</span>
+        </button>
+      </div>
     </div>
     <div class="g2">
       <div class="card">
         <div class="card-h"><span class="card-t">🛣️ Today\'s Route</span></div>
-        <div class="rtl">${sp?sp.route.map(r=>`<div class="rs"><div class="rdot" style="background:${r.t==='cur'?C[0]+'22':'transparent'};border-color:${C[0]}">${r.t==='start'?'🏠':r.t==='cur'?'🔵':'📍'}</div><div style="flex:1"><div style="font-weight:700;font-size:13px">${r.lbl}</div><div style="font-size:11px;color:var(--mut)">${r.t==='visit'?'Customer Visit':r.t==='cur'?'<span style="color:var(--grn)">● Live Location</span>':''}</div></div><div style="font-size:11px;color:var(--mut)">${r.tm}</div></div>`).join(''):'No route data'}</div>
+        <div class="rtl">${sp?(()=>{
+  const tl=sp.route.filter(r=>r.t==='start'||r.t==='visit');
+  if(!tl.length) return '<div style="font-size:12px;color:var(--mut);padding:8px 0">No visits yet today</div>';
+  let vn=0;
+  return tl.map(r=>{
+    if(r.t==='visit') vn++;
+    const dot = r.t==='start'?'S':String(vn);
+    const lbl = r.lbl||'—';
+    const sub = r.t==='visit'?'Customer Visit':'Office (Start)';
+    const tm  = r.tm||'';
+    return '<div class="rs">'
+      +'<div class="rdot" style="background:transparent;border-color:'+C[0]+'">'+dot+'</div>'
+      +'<div style="flex:1">'
+        +'<div style="font-weight:700;font-size:13px">'+lbl+'</div>'
+        +'<div style="font-size:11px;color:var(--mut)">'+sub+'</div>'
+      +'</div>'
+      +'<div style="font-size:11px;color:var(--mut)">'+tm+'</div>'
+      +'</div>';
+  }).join('');
+})():'No route data'}</div>
       </div>
       <div class="card">
         <div class="card-h"><span class="card-t">📋 Today\'s Summary</span></div>
@@ -3353,6 +3416,79 @@ function initMyMap(sp){
 }
 
 // Called by GPS watcher every time position updates — keeps live dot current
+// ============================================================
+// LOCATE ME — reusable GPS locate function for any map
+// ============================================================
+function locateOnMap(mapInstance, btnId, markerRef, markerRefSetter){
+  const btn = document.getElementById(btnId);
+  if(!navigator.geolocation){
+    toast('GPS not supported on this device','var(--red)'); return;
+  }
+  // Show loading state
+  if(btn){
+    btn.classList.add('locating');
+    btn.querySelector('.locate-lbl').textContent = 'Locating...';
+  }
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+      const acc = Math.round(pos.coords.accuracy);
+      // Update global GPS vars if this is the SP's own map
+      myLat = lat; myLng = lng;
+      // Fly to location smoothly
+      mapInstance.flyTo([lat, lng], 16, {animate:true, duration:1.2});
+      // Remove old locate marker if any
+      if(markerRef && mapInstance.hasLayer(markerRef)) markerRef.remove();
+      // Create pulsing blue dot
+      const icon = L.divIcon({
+        html:`<div style="position:relative;width:24px;height:24px">
+          <div style="position:absolute;inset:0;border-radius:50%;background:#3b82f6;opacity:.2;animation:blink 1.5s infinite"></div>
+          <div style="position:absolute;top:4px;left:4px;width:16px;height:16px;border-radius:50%;background:#3b82f6;border:3px solid #fff;box-shadow:0 0 0 4px rgba(59,130,246,.3)"></div>
+        </div>`,
+        className:'', iconSize:[24,24], iconAnchor:[12,12]
+      });
+      const newMarker = L.marker([lat,lng],{icon,zIndexOffset:1500})
+        .addTo(mapInstance)
+        .bindPopup('<b>Your Location</b><br><small>Accuracy: ±'+acc+'m</small>')
+        .openPopup();
+      if(markerRefSetter) markerRefSetter(newMarker);
+      // Reset button
+      if(btn){
+        btn.classList.remove('locating');
+        btn.querySelector('.locate-lbl').textContent = 'Locate Me';
+      }
+    },
+    err => {
+      if(btn){
+        btn.classList.remove('locating');
+        btn.querySelector('.locate-lbl').textContent = 'Locate Me';
+      }
+      const msgs = {1:'Location permission denied — tap 🔒 in address bar to allow',
+                    2:'GPS signal unavailable — try outdoors',
+                    3:'GPS timed out — please try again'};
+      toast(msgs[err.code]||'Could not get location','var(--red)');
+    },
+    {enableHighAccuracy:true, timeout:12000, maximumAge:5000}
+  );
+}
+
+// ── Locate button HTML (inline, so it's always the same markup) ──
+// locateBtnHTML is kept as a utility but buttons are injected directly in HTML
+// The function is unused — buttons are statically rendered in each map container
+
+// ── triggerLocate: dispatches to the right map ──
+let _locMarkers = {}; // track locate markers per map id
+function triggerLocate(mapId){
+  let mapInst = null;
+  if(mapId === 'trackMap') mapInst = tMap;
+  else if(mapId === 'dashMap') mapInst = dMap;
+  else if(mapId === 'visitMap') mapInst = visitMap;
+  else if(mapId === 'spVisitMap') mapInst = spvMap;
+  if(!mapInst){ toast('Map not ready — please wait a moment','var(--acc)'); return; }
+  locateOnMap(mapInst, 'locBtn_'+mapId, _locMarkers[mapId], m=>{ _locMarkers[mapId]=m; });
+}
+
 function updateMyMapLiveDot(){
   if(!tMap || !myLat || !myLng) return;
   const col = C[0];
@@ -3416,7 +3552,7 @@ function renderCustCards(list){
     </div>
   </div>`).join('');
 }
-function saveCust(){
+async function saveCust(){
   const n=document.getElementById('cu-name').value.trim(), m=document.getElementById('cu-mob').value.trim();
   if(!n||!m){toast('Name and mobile number are required!','var(--red)');return;}
   const spId=document.getElementById('cu-sp').value||curUser.id;
@@ -3424,14 +3560,18 @@ function saveCust(){
   const lat=parseFloat(document.getElementById('cu-lat').value)||null;
   const lng=parseFloat(document.getElementById('cu-lng').value)||null;
   const newCust={id:Date.now(),name:n,gst:document.getElementById('cu-gst').value.trim().toUpperCase(),mob:m,con:document.getElementById('cu-con').value.trim(),city:document.getElementById('cu-city').value.trim(),state:document.getElementById('cu-state').value.trim(),addr:document.getElementById('cu-addr').value.trim(),type:document.getElementById('cu-type').value,spId,spName:sp.name,lat,lng};
-  customers.push(newCust); sbSaveCustomer(newCust);
+  // Push to local array FIRST and save to localStorage immediately
+  customers.push(newCust);
+  saveData(); // localStorage write is synchronous — customer is safe immediately
+  // Then write to Supabase (await so it completes before navigating away)
+  await sbSaveCustomer(newCust);
   if(window._cuMap){window._cuMap.remove();window._cuMap=null;window._cuMarker=null;}
   closeM('mCust'); ['cu-name','cu-gst','cu-mob','cu-con','cu-city','cu-state','cu-addr'].forEach(id=>document.getElementById(id).value='');
   const mp=document.getElementById('cuMapDiv');if(mp)mp.style.display='none';
   const ph=document.getElementById('cuMapPlaceholder');if(ph)ph.style.display='flex';
   const ls=document.getElementById('cu-lat');if(ls)ls.value='';
   const lgs=document.getElementById('cu-lng');if(lgs)lgs.value='';
-  toast('✅ Customer added: '+n); saveData(); updS(); go('customers');
+  toast('Customer added: '+n); updS(); go('customers');
 }
 function delCust(id){if(!confirm('Delete this customer?'))return;customers=customers.filter(c=>c.id!==id);sbDelete('customers',String(id));saveData();updS();toast('Customer deleted','var(--red)');go('customers');}
 function updCustSP(){
@@ -3981,17 +4121,30 @@ function renderSalesReport(){
         <!-- Visit Timeline -->
         <div>
           <div style="font-family:'Plus Jakarta Sans',sans-serif;font-size:14px;font-weight:700;margin-bottom:10px;color:${col}">Visit Route — ${visitRoutes.length} stops</div>
-          ${sp.route.length?sp.route.map((r,ri)=>`
-            <div style="display:flex;gap:10px;padding:8px 0;position:relative${ri<sp.route.length-1?';border-bottom:1px solid var(--bor)':''}">
-              <div style="width:30px;height:30px;border-radius:50%;background:${r.t==='start'?'var(--sur2)':r.t==='cur'?col+'33':col};border:2px solid ${r.t==='start'?'var(--bor)':col};display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:${r.t==='start'?'var(--mut)':'#000'};flex-shrink:0">
-                ${r.t==='start'?'🏠':r.t==='cur'?'●':ri}
-              </div>
-              <div style="flex:1">
-                <div style="font-weight:700;font-size:13px">${r.lbl}</div>
-                <div style="font-size:11px;color:var(--mut)">${r.t==='visit'?'Customer Visit':r.t==='cur'?'<span style="color:var(--grn)">● Current Location</span>':'Start Point'}</div>
-              </div>
-              <div style="font-size:11px;color:var(--mut);white-space:nowrap">🕐 ${r.tm}</div>
-            </div>`).join(''):'<div class="es" style="padding:14px"><div class="ei"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.3"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg></div>No route data yet</div>'}
+          ${(()=>{
+            const timelineEntries = sp.route.filter(r => r.t === 'start' || r.t === 'visit');
+            if(!timelineEntries.length) return '<div class="es" style="padding:14px"><div style="opacity:.3;margin-bottom:8px"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg></div>No route data yet</div>';
+            let vn=0;
+            return timelineEntries.map((r,ri)=>{
+              if(r.t==='visit') vn++;
+              const sep = ri<timelineEntries.length-1 ? ';border-bottom:1px solid var(--bor)' : '';
+              const bg  = r.t==='start' ? 'var(--sur2)' : col;
+              const bdr = r.t==='start' ? 'var(--bor)'  : col;
+              const clr = r.t==='start' ? 'var(--mut)'  : '#000';
+              const dot = r.t==='start' ? 'S' : String(vn);
+              const lbl = r.lbl || '—';
+              const sub = r.t==='visit' ? 'Customer Visit' : 'Start Point';
+              const tm  = r.tm || '';
+              return '<div style="display:flex;gap:10px;padding:8px 0;position:relative'+sep+'">'
+                +'<div style="width:30px;height:30px;border-radius:50%;background:'+bg+';border:2px solid '+bdr+';display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:'+clr+';flex-shrink:0">'+dot+'</div>'
+                +'<div style="flex:1">'
+                  +'<div style="font-weight:700;font-size:13px">'+lbl+'</div>'
+                  +'<div style="font-size:11px;color:var(--mut)">'+sub+'</div>'
+                +'</div>'
+                +'<div style="font-size:11px;color:var(--mut);white-space:nowrap">'+tm+'</div>'
+                +'</div>';
+            }).join('');
+          })()}
         </div>
 
         <!-- Orders list -->
@@ -4162,7 +4315,13 @@ function renderSPMapPage(pc,ta){
           ${spList.map((s,i)=>`<span style="display:flex;align-items:center;gap:5px"><span style="width:14px;height:14px;border-radius:50%;background:${C[i]};display:inline-block;font-size:9px;color:#000;display:flex;align-items:center;justify-content:center;font-weight:700;border:1px solid #fff">1</span>${s.name.split(' ')[0]}</span>`).join('')}
         </div>
       </div>
-      <div id="spVisitMap" style="height:420px;border-radius:10px;border:1px solid var(--bor)"></div>
+      <div class="map-wrap">
+        <div id="spVisitMap" style="height:420px;border-radius:10px;border:1px solid var(--bor)"></div>
+        <button id="locBtn_spVisitMap" class="locate-btn" onclick="triggerLocate('spVisitMap')" title="Center map on your GPS location">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
+          <span class="locate-lbl">Locate Me</span>
+        </button>
+      </div>
     </div>
     <div class="card">
       <div class="card-h"><span class="card-t">📋 Visit Summary</span></div>
@@ -5214,7 +5373,13 @@ function renderCheckinPage(pc,ta){
         <span class="card-t">🗺️ Live Location & Proximity</span>
         <span class="badge ${pinTime?'b-grn':'b-red'}">${pinTime?'● Active':'● Offline'}</span>
       </div>
-      <div id="visitMap" style="height:460px;border-radius:10px;border:1px solid var(--bor)"></div>
+      <div class="map-wrap" style="border-radius:10px">
+        <div id="visitMap" style="height:460px;border-radius:10px;border:1px solid var(--bor)"></div>
+        <button id="locBtn_visitMap" class="locate-btn" onclick="triggerLocate('visitMap')" title="Center map on your GPS location">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
+          <span class="locate-lbl">Locate Me</span>
+        </button>
+      </div>
       <div style="margin-top:10px;display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--mut)">
         <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#3b82f6;vertical-align:middle"></span> Your location</span>
         <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:rgba(16,185,129,.6);border:2px solid var(--grn);vertical-align:middle"></span> 100m zone (green = in range)</span>
@@ -5537,9 +5702,11 @@ async function logVisitCheckin(){
   if(sp){
     sp.visits=(sp.visits||0)+1;
     sp.route.push({lat,lng,lbl:cust.name,t:'visit',tm:timeStr,purpose,notes,dist});
-    const curIdx=sp.route.findIndex(r=>r.t==='cur');
-    if(curIdx>-1) sp.route[curIdx]={lat,lng,lbl:'Current Location',t:'cur',tm:'Now'};
-    else sp.route.push({lat,lng,lbl:'Current Location',t:'cur',tm:'Now'});
+    // Note: we no longer add/update 'cur' entries in the route array.
+    // Current live location is tracked via myLat/myLng and shown on the map dot.
+    // Removing cur entries prevents "undefined" labels in the route timeline.
+    // Also remove any stale cur entries from previous sessions:
+    sp.route = sp.route.filter(e => e.t !== 'cur');
     await sbSaveSP(sp);
     const distNote = dist!=null ? (dist<=100?' (within 100m ✅)':' ('+dist+'m away ⚠️)') : '';
     addNotif('visit','📍 Visit: '+cust.name, curUser.name+' checked in at '+cust.name+' ('+purpose+')'+distNote+' — '+timeStr, null);
