@@ -1648,7 +1648,12 @@ async function loadFromSupabase(silent=false){
       const localOnly = customers.filter(c => !dbIds.has(String(c.id)));
       customers = [...fromDB, ...localOnly];
     }
-    if(ords)  orders=ords.map(r=>({id:r.id,cid:r.cust_id,custName:r.cust_name,custMob:r.cust_mob,spId:r.sp_id,spName:r.sp_name,date:r.date,ddate:r.delivery_date,items:JSON.parse(r.items||'[]'),total:r.total,pay:r.payment,pri:r.priority,notes:r.notes,status:r.status,disp:r.dispatch?JSON.parse(r.dispatch):null,createdAt:r.created_at}));
+    if(ords){
+      const fromDBOrds = ords.map(r=>({id:r.id,cid:r.cust_id,custName:r.cust_name,custMob:r.cust_mob,spId:r.sp_id,spName:r.sp_name,date:r.date,ddate:r.delivery_date,items:JSON.parse(r.items||'[]'),total:r.total,pay:r.payment,pri:r.priority,notes:r.notes,status:r.status,disp:r.dispatch?JSON.parse(r.dispatch):null,createdAt:r.created_at}));
+      const dbOrdIds = new Set(fromDBOrds.map(o=>String(o.id)));
+      const localOnlyOrds = orders.filter(o => !dbOrdIds.has(String(o.id)));
+      orders = [...fromDBOrds, ...localOnlyOrds];
+    }
     if(prods&&prods.length) products=prods.map(r=>({id:r.id,name:r.name,code:r.code,cat:r.category,price:r.price,unit:r.unit,sizes:r.sizes,hsn:r.hsn,desc:r.description}));
     if(sps&&sps.length){
       sps.forEach(r=>{
@@ -1665,7 +1670,12 @@ async function loadFromSupabase(silent=false){
         }
       });
     }
-    if(exps) expenses=exps.map(r=>({id:r.id,spId:r.sp_id,spName:r.sp_name,cat:r.category,amt:r.amount,desc:r.description,date:r.date,mode:r.mode,partyId:r.party_id,partyName:r.party_name,files:JSON.parse(r.files||'[]'),status:r.status,adminNote:r.admin_note,createdAt:r.created_at}));
+    if(exps){
+      const fromDBExps = exps.map(r=>({id:r.id,spId:r.sp_id,spName:r.sp_name,cat:r.category,amt:r.amount,desc:r.description,date:r.date,mode:r.mode,partyId:r.party_id,partyName:r.party_name,files:JSON.parse(r.files||'[]'),status:r.status,adminNote:r.admin_note,createdAt:r.created_at}));
+      const dbExpIds = new Set(fromDBExps.map(e=>String(e.id)));
+      const localOnlyExps = expenses.filter(e => !dbExpIds.has(String(e.id)));
+      expenses = [...fromDBExps, ...localOnlyExps];
+    }
     // Load transport from Supabase
     try{ const {data:trData}=await sb.from('transport').select('*'); if(trData&&trData.length) transportList=trData.map(r=>({id:r.id,name:r.name,contact:r.contact||'',mob:r.mob||'',type:r.type||'Courier',city:r.city||'',notes:r.notes||'',status:r.status||'active'})); }catch(e){}
     lsSave();
@@ -1705,6 +1715,20 @@ function showDbLoader(show){
 lsLoad();
 normalizeSpRoutes(); // Update SP route starts with stored office coords
 setInterval(()=>{ lsSave(); },30000);
+// Periodic sync: re-pull from Supabase every 90s as realtime fallback
+// This catches any events missed due to connection drops
+let _syncTimer = null;
+function startPeriodicSync(){
+  if(_syncTimer) return;
+  _syncTimer = setInterval(async ()=>{
+    if(!supaReady || !curUser) return;
+    await loadFromSupabase(true);
+    updS(); updBadges();
+    // Only re-render if on a data page (not maps — they handle their own refresh)
+    const dataPages = ['orders','myorders','customers','expenses','myexpenses','dash','reports','salespersons','attendance'];
+    if(dataPages.includes(currentPage)) renderPage(currentPage);
+  }, 90000); // every 90 seconds
+}
 
 // ============================================================
 // REAL-TIME SYNC — Supabase subscriptions
@@ -1762,14 +1786,19 @@ function handlePunchBroadcast(payload){
       const sp = spList.find(s => s.id === d.id);
       if(sp){
         sp.checkedIn = true; sp.cin = t;
+        // Mark present in attendance (both live and for today)
         if(!att[d.id]) att[d.id]={};
         att[d.id][new Date().getDate()] = 'pr';
+        lsSave();
       }
     } else {
       addNotif('checkin','🔴 Punch Out: '+spName, spName+' punched out at '+t, null);
       toast('🔴 '+spName+' punched out at '+t, 'var(--red)');
       const sp2 = spList.find(s => s.id === d.id);
-      if(sp2) sp2.checkedIn = false;
+      if(sp2){
+        sp2.checkedIn = false;
+        // Keep att as 'pr' — they were present today even if they punched out
+      }
     }
     updBadges(); updS();
     if(currentPage==='salespersons') renderPage('salespersons');
@@ -1825,7 +1854,7 @@ function handleRealtimeOrder(payload){
     }
   }
   lsSave(); updS(); updBadges();
-  if(['dash','orders','myorders','dispatch'].includes(currentPage)) renderPage(currentPage);
+  if(['dash','orders','myorders','dispatch','reports','salesreport'].includes(currentPage)) renderPage(currentPage);
 }
 function handleRealtimeExpense(payload){
   const r=payload.new||payload.old;
@@ -1839,8 +1868,8 @@ function handleRealtimeExpense(payload){
       addNotif('expense','💸 New Expense: '+e.id,e.spName+' — ₹'+e.amt.toLocaleString('en-IN')+' | '+e.cat,e.id);
     }
   }
-  lsSave(); updBadges();
-  if(['expenses','myexpenses','dash'].includes(currentPage)) renderPage(currentPage);
+  lsSave(); updBadges(); updS();
+  if(['expenses','myexpenses','dash','reports'].includes(currentPage)) renderPage(currentPage);
 }
 function handleRealtimeCustomer(payload){
   const r=payload.new||payload.old;
@@ -1852,7 +1881,7 @@ function handleRealtimeCustomer(payload){
     if(idx>-1) customers[idx]=c; else customers.push(c);
   }
   lsSave(); updS();
-  if(['customers','dash'].includes(currentPage)) renderPage(currentPage);
+  if(['customers','myexpenses','checkin','dash'].includes(currentPage)) renderPage(currentPage);
 }
 // Called every time a salesperson pushes their GPS to Supabase
 function handleRealtimeLiveLocation(payload){
@@ -2356,6 +2385,7 @@ function doLogout(){
   if(window._cvMap){window._cvMap.remove();window._cvMap=null;}
   // Unsubscribe realtime channel
   if(realtimeChannel){sb.removeChannel(realtimeChannel);realtimeChannel=null;}
+  if(_syncTimer){clearInterval(_syncTimer);_syncTimer=null;}
 }
 
 // ============================================================
@@ -2534,11 +2564,16 @@ function startApp(){
   // Only init+load if not already done (session restore pre-loads)
   if(!supaReady){ initSupabase(); }
   if(!supaReady){
-    loadFromSupabase().then(()=>{ updS(); updBadges(); go('dash'); });
+    loadFromSupabase().then(()=>{ updS(); updBadges(); go('dash'); startPeriodicSync(); });
   } else {
     updS(); updBadges(); go('dash');
     // Refresh data quietly in background
-    loadFromSupabase(true).then(()=>{ updS(); updBadges(); if(currentPage==='dash') renderPage('dash'); });
+    loadFromSupabase(true).then(()=>{
+      updS(); updBadges();
+      // Re-render current page with fresh data from all devices
+      renderPage(currentPage);
+    });
+    startPeriodicSync();
   }
 }
 
@@ -3854,7 +3889,14 @@ function renderSPTable(){
     <td style="font-family:monospace;color:var(--acc)">${s.id}</td>
     <td>📱 ${s.mob}</td><td>${s.zone}</td>
     <td><span class="badge ${s.status==='active'?'b-grn':'b-red'}">${s.status==='active'?'Active':'Inactive'}</span></td>
-    <td><span class="badge ${s.checkedIn?'b-grn':'b-red'}">${s.checkedIn?'● Present':'● Absent'}</span></td>
+    <td>${(()=>{
+      const todayKey = new Date().getDate();
+      const wasPresent = att[s.id] && att[s.id][todayKey] === 'pr';
+      const isLive = s.checkedIn;
+      if(isLive) return '<span class="badge b-grn" style="gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:var(--grn);animation:blink 1s infinite;flex-shrink:0;display:inline-block"></span>Active</span>';
+      if(wasPresent) return '<span class="badge b-blue">Present</span>';
+      return '<span class="badge b-red">Absent</span>';
+    })()}</td>
     <td>${s.orders}</td>
     <td>
       <button class="btn btn-out" style="padding:4px 10px;font-size:11px" onclick="editSP(${i})">✏️ Edit</button>
@@ -3977,7 +4019,14 @@ function renderAttPage(pc){
             <td>${s.visits}</td>
             <td>${s.orders}</td>
             <td>${s.km}</td>
-            <td><span class="badge ${s.checkedIn?'b-grn':'b-red'}">${s.checkedIn?'Present':'Absent'}</span></td>
+            <td>${(()=>{
+          const todayKey2 = new Date().getDate();
+          const wasPresent2 = att[s.id] && att[s.id][todayKey2] === 'pr';
+          const isLive2 = s.checkedIn;
+          if(isLive2) return '<span class="badge b-grn" style="gap:5px"><span style="width:7px;height:7px;border-radius:50%;background:var(--grn);animation:blink 1s infinite;flex-shrink:0;display:inline-block"></span>Active</span>';
+          if(wasPresent2) return '<span class="badge b-blue">Present</span>';
+          return '<span class="badge b-red">Absent</span>';
+        })()}</td>
           </tr>`).join('')}
           </tbody>
         </table>
@@ -4334,7 +4383,13 @@ function renderSPMapPage(pc,ta){
           <td><b style="color:var(--blue)">${s.visits}</b></td>
           <td>${s.km||'0 km'}</td>
           <td><b style="color:var(--acc)">${s.orders}</b></td>
-          <td><span class="badge ${s.checkedIn?'b-grn':'b-red'}">${s.checkedIn?'● Active':'● Offline'}</span></td>
+          <td>${(()=>{
+            const td3=new Date().getDate();
+            const wp3=att[s.id]&&att[s.id][td3]==='pr';
+            if(s.checkedIn) return '<span class="badge b-grn">● Active</span>';
+            if(wp3) return '<span class="badge b-blue">● Present</span>';
+            return '<span class="badge b-mut">● Offline</span>';
+          })()}</td>
           <td><button class="btn btn-out" style="padding:4px 9px;font-size:11px" onclick="document.getElementById('spmapSP').value='${i}';clearSPRoute()">Clear</button></td>
         </tr>`).join('')}
         </tbody></table>
