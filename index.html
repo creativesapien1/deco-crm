@@ -1715,19 +1715,81 @@ function showDbLoader(show){
 lsLoad();
 normalizeSpRoutes(); // Update SP route starts with stored office coords
 setInterval(()=>{ lsSave(); },30000);
-// Periodic sync: re-pull from Supabase every 90s as realtime fallback
-// This catches any events missed due to connection drops
+// ─────────────────────────────────────────────────────────────
+// SMART INCREMENTAL SYNC — polls Supabase every 15s for changes
+// Does NOT rely on postgres_changes / realtime subscriptions.
+// Uses COUNT queries to detect changes cheaply, then fetches only
+// if the remote count differs from local count.
+// ─────────────────────────────────────────────────────────────
 let _syncTimer = null;
+let _lastSyncCounts = {customers:0, orders:0, expenses:0};
+
+async function smartSync(){
+  if(!supaReady || !curUser) return;
+  try{
+    // Cheap count check — only fetch full data if counts differ
+    const [cc, oc, ec] = await Promise.all([
+      sb.from('customers').select('id',{count:'exact',head:true}),
+      sb.from('orders').select('id',{count:'exact',head:true}),
+      sb.from('expenses').select('id',{count:'exact',head:true}),
+    ]);
+    const remoteC = cc.count ?? 0;
+    const remoteO = oc.count ?? 0;
+    const remoteE = ec.count ?? 0;
+    const localC = customers.length;
+    const localO = orders.length;
+    const localE = expenses.length;
+
+    let changed = false;
+
+    // Fetch only tables that changed
+    if(remoteC !== _lastSyncCounts.customers || remoteC !== localC){
+      const {data} = await sb.from('customers').select('*');
+      if(data){
+        const fromDB = data.map(r=>({id:r.id,name:r.name,gst:r.gst,mob:r.mob,con:r.contact,city:r.city,state:r.state,addr:r.addr,type:r.type,spId:r.sp_id,spName:r.sp_name,lat:r.lat||null,lng:r.lng||null}));
+        const dbIds = new Set(fromDB.map(c=>String(c.id)));
+        const localOnly = customers.filter(c=>!dbIds.has(String(c.id)));
+        customers = [...fromDB, ...localOnly];
+        _lastSyncCounts.customers = remoteC;
+        changed = true;
+      }
+    }
+    if(remoteO !== _lastSyncCounts.orders || remoteO !== localO){
+      const {data} = await sb.from('orders').select('*');
+      if(data){
+        const fromDB = data.map(r=>({id:r.id,cid:r.cust_id,custName:r.cust_name,custMob:r.cust_mob,spId:r.sp_id,spName:r.sp_name,date:r.date,ddate:r.delivery_date,items:JSON.parse(r.items||'[]'),total:r.total,pay:r.payment,pri:r.priority,notes:r.notes,status:r.status,disp:r.dispatch?JSON.parse(r.dispatch):null,createdAt:r.created_at}));
+        const dbIds = new Set(fromDB.map(o=>String(o.id)));
+        const localOnly = orders.filter(o=>!dbIds.has(String(o.id)));
+        orders = [...fromDB, ...localOnly];
+        _lastSyncCounts.orders = remoteO;
+        changed = true;
+      }
+    }
+    if(remoteE !== _lastSyncCounts.expenses || remoteE !== localE){
+      const {data} = await sb.from('expenses').select('*');
+      if(data){
+        const fromDB = data.map(r=>({id:r.id,spId:r.sp_id,spName:r.sp_name,cat:r.category,amt:r.amount,desc:r.description,date:r.date,mode:r.mode,partyId:r.party_id,partyName:r.party_name,files:JSON.parse(r.files||'[]'),status:r.status,adminNote:r.admin_note,createdAt:r.created_at}));
+        const dbIds = new Set(fromDB.map(e=>String(e.id)));
+        const localOnly = expenses.filter(e=>!dbIds.has(String(e.id)));
+        expenses = [...fromDB, ...localOnly];
+        _lastSyncCounts.expenses = remoteE;
+        changed = true;
+      }
+    }
+
+    if(changed){
+      lsSave(); updS(); updBadges();
+      const dataPages=['orders','myorders','customers','expenses','myexpenses','dash','reports','salesreport','salespersons','attendance'];
+      if(dataPages.includes(currentPage)) renderPage(currentPage);
+    }
+  }catch(e){ /* silent — network may be flaky */ }
+}
+
 function startPeriodicSync(){
   if(_syncTimer) return;
-  _syncTimer = setInterval(async ()=>{
-    if(!supaReady || !curUser) return;
-    await loadFromSupabase(true);
-    updS(); updBadges();
-    // Only re-render if on a data page (not maps — they handle their own refresh)
-    const dataPages = ['orders','myorders','customers','expenses','myexpenses','dash','reports','salespersons','attendance'];
-    if(dataPages.includes(currentPage)) renderPage(currentPage);
-  }, 90000); // every 90 seconds
+  // Run immediately on start, then every 15 seconds
+  smartSync();
+  _syncTimer = setInterval(smartSync, 15000);
 }
 
 // ============================================================
@@ -2560,20 +2622,22 @@ function startApp(){
   buildNav();
   const today=new Date().toISOString().split('T')[0];
   ['o-date','d-date'].forEach(id=>{const e=document.getElementById(id);if(e)e.value=today;});
-  // Init Supabase + load fresh data
-  // Only init+load if not already done (session restore pre-loads)
+  // Init Supabase + load data
   if(!supaReady){ initSupabase(); }
   if(!supaReady){
-    loadFromSupabase().then(()=>{ updS(); updBadges(); go('dash'); startPeriodicSync(); });
-  } else {
-    updS(); updBadges(); go('dash');
-    // Refresh data quietly in background
-    loadFromSupabase(true).then(()=>{
-      updS(); updBadges();
-      // Re-render current page with fresh data from all devices
-      renderPage(currentPage);
+    // Fresh login — no session restore — must load from scratch
+    loadFromSupabase().then(()=>{
+      // Seed sync counts after initial load
+      _lastSyncCounts = {customers:customers.length, orders:orders.length, expenses:expenses.length};
+      updS(); updBadges(); go('dash');
+      startPeriodicSync();
     });
-    startPeriodicSync();
+  } else {
+    // Data already loaded by session restore — just show the app
+    // Seed counts so smartSync knows baseline
+    _lastSyncCounts = {customers:customers.length, orders:orders.length, expenses:expenses.length};
+    updS(); updBadges(); go('dash');
+    startPeriodicSync(); // start 15s polling immediately
   }
 }
 
@@ -3606,9 +3670,11 @@ async function saveCust(){
   const ph=document.getElementById('cuMapPlaceholder');if(ph)ph.style.display='flex';
   const ls=document.getElementById('cu-lat');if(ls)ls.value='';
   const lgs=document.getElementById('cu-lng');if(lgs)lgs.value='';
+  // Update sync count so smartSync doesn't re-fetch our own just-saved record
+  _lastSyncCounts.customers = customers.length;
   toast('Customer added: '+n); updS(); go('customers');
 }
-function delCust(id){if(!confirm('Delete this customer?'))return;customers=customers.filter(c=>c.id!==id);sbDelete('customers',String(id));saveData();updS();toast('Customer deleted','var(--red)');go('customers');}
+function delCust(id){if(!confirm('Delete this customer?'))return;customers=customers.filter(c=>c.id!==id);sbDelete('customers',String(id));_lastSyncCounts.customers=customers.length;saveData();updS();toast('Customer deleted','var(--red)');go('customers');}
 function updCustSP(){
   const s=document.getElementById('cu-sp'); if(!s)return;
   s.innerHTML='<option value="admin">Admin</option>'+spList.map(sp=>`<option value="${sp.id}">${sp.name}</option>`).join('');
@@ -3725,6 +3791,7 @@ function importBulkParty(){
   document.getElementById('bulkPartyText').value='';
   document.getElementById('bulkPartyPreview').style.display='none';
   window._bulkPartyParsed=null;
+  _lastSyncCounts.customers = customers.length;
   toast(`✅ ${added} parties imported! ${skipped} duplicate(s) skipped.`);
   go('customers');
 }
@@ -4616,6 +4683,7 @@ function saveOrder(){
   };
   orders.unshift(o); sbSaveOrder(o);
   if(curUser.role==='sales'){const s=spList.find(x=>x.id===curUser.id); if(s)s.orders++;}
+  _lastSyncCounts.orders = orders.length;
   closeM('mOrder');
   addNotif('order','New Order: '+o.id,'Customer: '+cu.name+' | ₹'+total.toLocaleString('en-IN')+' | '+o.spName,o.id);
   toast('Order submitted! Team notified. ID: '+o.id);
@@ -4772,6 +4840,7 @@ function saveExpense(){
     createdAt:new Date().toLocaleString('en-IN')
   };
   expenses.unshift(exp); sbSaveExpense(exp);
+  _lastSyncCounts.expenses = expenses.length;
   closeM('mExpense');
   saveData();
   addNotif('expense','💸 New Expense: '+exp.id,sp.name+' — ₹'+amt.toLocaleString('en-IN')+' | '+cat,exp.id);
@@ -5054,24 +5123,20 @@ async function tryRestoreSession(){
       startGPS(); // Resume GPS — permission already granted
     }
 
-    // STEP 5: Start app (show dashboard immediately from local data)
-    // For sales role: if no pin (not punched in), show punch screen
+    // STEP 5: Ensure Supabase is ready, then do a FULL sync before showing app
+    // This guarantees fresh data on every login/refresh — not stale cache
+    if(!supaReady){ initSupabase(); }
+    await loadFromSupabase(true); // always fetch fresh — this is the source of truth
+
+    // STEP 6: Start app or show punch screen
     if(s.role === 'sales' && !s.pin){
-      // Show punch screen — user needs to punch in for the day
       document.getElementById('punchScreen').classList.add('visible');
       document.getElementById('psUserName').textContent = curUser.name;
       const sp2 = spList.find(x=>x.id===curUser.id);
       document.getElementById('psUserRole').textContent = 'Sales Executive' + (sp2?.zone ? ' — '+sp2.zone : '');
-      // Don't call startApp yet — wait for punch-in
       return true;
     }
     startApp();
-
-    // STEP 6: Silently refresh from Supabase in background
-    // (don't block — user sees dashboard instantly from cache)
-    if(!supaReady){ initSupabase(); }
-    loadFromSupabase(true).catch(()=>{});
-
     return true;
   } catch(e){
     console.warn('Session restore failed:', e);
