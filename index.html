@@ -1463,6 +1463,7 @@ let sb = null;
 let supaReady = false;
 
 function initSupabase(){
+  if(supaReady) return; // already initialised — safe to call multiple times
   if(SUPA_URL==='YOUR_SUPABASE_URL'||SUPA_KEY==='YOUR_SUPABASE_ANON_KEY'){
     console.warn('Supabase keys not set — using localStorage fallback');
     return false;
@@ -1743,7 +1744,7 @@ async function smartSync(){
     let changed = false;
 
     // Fetch only tables that changed
-    if(remoteC !== _lastSyncCounts.customers || remoteC !== localC){
+    if(remoteC !== _lastSyncCounts.customers || remoteC !== localC || _lastSyncCounts.customers === 0){
       const {data} = await sb.from('customers').select('*');
       if(data){
         const fromDB = data.map(r=>({id:r.id,name:r.name,gst:r.gst,mob:r.mob,con:r.contact,city:r.city,state:r.state,addr:r.addr,type:r.type,spId:r.sp_id,spName:r.sp_name,lat:r.lat||null,lng:r.lng||null}));
@@ -1754,7 +1755,7 @@ async function smartSync(){
         changed = true;
       }
     }
-    if(remoteO !== _lastSyncCounts.orders || remoteO !== localO){
+    if(remoteO !== _lastSyncCounts.orders || remoteO !== localO || _lastSyncCounts.orders === 0){
       const {data} = await sb.from('orders').select('*');
       if(data){
         const fromDB = data.map(r=>({id:r.id,cid:r.cust_id,custName:r.cust_name,custMob:r.cust_mob,spId:r.sp_id,spName:r.sp_name,date:r.date,ddate:r.delivery_date,items:JSON.parse(r.items||'[]'),total:r.total,pay:r.payment,pri:r.priority,notes:r.notes,status:r.status,disp:r.dispatch?JSON.parse(r.dispatch):null,createdAt:r.created_at}));
@@ -1765,7 +1766,7 @@ async function smartSync(){
         changed = true;
       }
     }
-    if(remoteE !== _lastSyncCounts.expenses || remoteE !== localE){
+    if(remoteE !== _lastSyncCounts.expenses || remoteE !== localE || _lastSyncCounts.expenses === 0){
       const {data} = await sb.from('expenses').select('*');
       if(data){
         const fromDB = data.map(r=>({id:r.id,spId:r.sp_id,spName:r.sp_name,cat:r.category,amt:r.amount,desc:r.description,date:r.date,mode:r.mode,partyId:r.party_id,partyName:r.party_name,files:JSON.parse(r.files||'[]'),status:r.status,adminNote:r.admin_note,createdAt:r.created_at}));
@@ -1787,9 +1788,15 @@ async function smartSync(){
 
 function startPeriodicSync(){
   if(_syncTimer) return;
-  // Run immediately on start, then every 15 seconds
+  // Run immediately on start, then every 10 seconds
   smartSync();
-  _syncTimer = setInterval(smartSync, 15000);
+  _syncTimer = setInterval(smartSync, 10000);
+  // Also sync immediately when user returns to this tab/app
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState === 'visible' && supaReady && curUser){
+      smartSync();
+    }
+  });
 }
 
 // ============================================================
@@ -2346,6 +2353,9 @@ async function doLogin(){
   const err=document.getElementById('loginErr');
   const btn=document.querySelector('.l-btn');
   if(btn){btn.textContent='Signing in...';btn.disabled=true;}
+  // Always ensure Supabase is initialised before login (needed for writes)
+  initSupabase();
+  if(!spList.length) await loadFromSupabase(true);
 
   // Admin login — check against stored hash or plain text (migration)
   if(id==='admin'){
@@ -2358,14 +2368,13 @@ async function doLogin(){
       saveSession();
       err.style.display='none';
       document.getElementById('loginScreen').style.display='none';
-      if(btn){btn.textContent='🚀 Login';btn.disabled=false;}
+      if(btn){btn.textContent='Sign In';btn.disabled=false;}
+      initSupabase(); // CRITICAL: must be called before startApp so writes work
       startApp(); return;
     }
   }
 
   // Salesperson login — hash-aware check
-  // Try to load fresh data from Supabase if spList is empty (new device)
-  if(!spList.length&&!supaReady){ initSupabase(); await loadFromSupabase(); }
   const hashed=await hashPass(pass);
   const sp=spList.find(s=>s.id===id&&s.status==='active'&&(s.pass===hashed||(!isHashed(s.pass)&&s.pass===pass)));
   if(sp){
@@ -2622,8 +2631,11 @@ function startApp(){
   buildNav();
   const today=new Date().toISOString().split('T')[0];
   ['o-date','d-date'].forEach(id=>{const e=document.getElementById(id);if(e)e.value=today;});
-  // Init Supabase + load data
-  if(!supaReady){ initSupabase(); }
+  // Ensure Supabase is always ready (defensive — should already be called)
+  initSupabase();
+  if(!supaReady){
+    console.error('Supabase failed to initialise — check SUPA_URL and SUPA_KEY');
+  }
   if(!supaReady){
     // Fresh login — no session restore — must load from scratch
     loadFromSupabase().then(()=>{
@@ -5045,27 +5057,25 @@ async function tryRestoreSession(){
     if(!s || !s.id || !s.role) return false;
 
     // STEP 1: Hide login screen immediately (before any async work)
-    // Removes the flash — user sees nothing until app is ready
     const loginEl = document.getElementById('loginScreen');
     if(loginEl){ loginEl.classList.add('pre-hidden'); loginEl.style.display='none'; }
 
-    // STEP 2: Load local data first (instant, no network needed)
-    // This lets us verify the user exists from cached data
+    // STEP 2: Init Supabase ALWAYS — this must happen before any data operations
+    // Previously this was only called in some branches, causing supaReady=false
+    // for returning users, making all DB writes silently fail
+    initSupabase();
+
+    // STEP 3: Load local cache first (instant), then always fetch fresh from Supabase
     lsLoad();
     normalizeSpRoutes();
+    // Always fetch fresh data from Supabase — ensures cross-device sync on every load
+    await loadFromSupabase(true);
 
-    // STEP 3: Verify user identity from local cache first
+    // STEP 4: Verify user identity (now with fresh Supabase data)
     if(s.role === 'admin'){
       curUser = {id:'admin', name:'Admin', role:'admin'};
     } else if(s.role === 'sales'){
-      // Try local cache first, then Supabase
       let sp = spList.find(x => x.id === s.id && x.status === 'active');
-      if(!sp){
-        // Not in cache — try Supabase
-        initSupabase();
-        await loadFromSupabase(true);
-        sp = spList.find(x => x.id === s.id && x.status === 'active');
-      }
       if(!sp){
         // User no longer exists or deactivated
         clearSession();
@@ -5075,11 +5085,7 @@ async function tryRestoreSession(){
       curUser = {id:sp.id, name:sp.name, role:'sales'};
     } else if(s.role === 'dispatch'){
       let dp = dispatchList.find(x => x.id === s.id && x.status === 'active');
-      if(!dp){
-        initSupabase();
-        await loadFromSupabase(true);
-        dp = dispatchList.find(x => x.id === s.id && x.status === 'active');
-      }
+      // dp lookup after fresh Supabase load above
       if(!dp){
         clearSession();
         if(loginEl){ loginEl.classList.remove('pre-hidden'); loginEl.style.display='flex'; }
@@ -5123,12 +5129,8 @@ async function tryRestoreSession(){
       startGPS(); // Resume GPS — permission already granted
     }
 
-    // STEP 5: Ensure Supabase is ready, then do a FULL sync before showing app
-    // This guarantees fresh data on every login/refresh — not stale cache
-    if(!supaReady){ initSupabase(); }
-    await loadFromSupabase(true); // always fetch fresh — this is the source of truth
-
-    // STEP 6: Start app or show punch screen
+    // STEP 5: Start app or show punch screen
+    // Data is already fresh from the loadFromSupabase(true) in STEP 3 above
     if(s.role === 'sales' && !s.pin){
       document.getElementById('punchScreen').classList.add('visible');
       document.getElementById('psUserName').textContent = curUser.name;
@@ -6337,212 +6339,3 @@ function getDeliveryStatusBadge(o){
 </script>
 </body>
 </html>
-<script>
-/* DecoCRM inline fixes: realtime + save robustness (2026-04-05) */
-(function(){
-  if(window.__decocrm_patched__) return; window.__decocrm_patched__=true;
-  const log=(...a)=>console.log('[DecoCRM fix]',...a);
-  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-  const asId = v => v==null?null:String(v);
-  const QKEY='dcrm_pending_writes_v1';
-  function loadQ(){ try{ return JSON.parse(localStorage.getItem(QKEY)||'[]'); }catch(e){ return []; } }
-  function saveQ(q){ localStorage.setItem(QKEY, JSON.stringify(q)); }
-  function enqueue(task){ const q=loadQ(); q.push(task); saveQ(q); }
-  if(window.sb && typeof window.sb.from==='function'){
-    window.sbUpsert = async function(table,row){
-      const { error } = await sb.from(table).upsert(row,{ onConflict:'id' });
-      if(error){ console.error('upsert failed', table, error); throw error; }
-      return true;
-    };
-    log('sbUpsert patched to throw on error');
-  }
-  window.sbSaveCustomer = async function(cust, retries=3){
-    if(!window.supaReady) return false;
-    const row={ id:asId(cust.id), name:cust.name, gst:cust.gst||'', mob:cust.mob, contact:cust.con||'', city:cust.city||'', state:cust.state||'', addr:cust.addr||'', type:cust.type||'Retailer', sp_id:cust.spId||'admin', sp_name:cust.spName||'Admin', lat:cust.lat||null, lng:cust.lng||null };
-    let lastErr=null;
-    for(let i=0;i<retries;i++){
-      try{ await window.sbUpsert('customers', row); return true; }
-      catch(e){ lastErr=e; await sleep(600*(i+1)); }
-    }
-    enqueue({t:'customers', row, ts:Date.now()});
-    try{ window.toast && toast('Saved offline � will sync when online','var(--acc)'); }catch(_){ }
-    console.warn('Queued customer for retry', row, lastErr); return false;
-  };
-  log('sbSaveCustomer patched with retries + queue');
-  window.handleRealtimeCustomer = function(payload){
-    const r = payload && (payload.new||payload.old); if(!r) return;
-    const rid = asId(r.id);
-    if(payload.eventType==='DELETE'){ window.customers = (window.customers||[]).filter(c=>asId(c.id)!==rid); }
-    else{
-      const c={ id:rid, name:r.name, gst:r.gst, mob:r.mob, con:r.contact, city:r.city, state:r.state, addr:r.addr, type:r.type, spId:r.sp_id, spName:r.sp_name, lat:r.lat||null, lng:r.lng||null };
-      const idx=(window.customers||[]).findIndex(x=>asId(x.id)===rid);
-      if(idx>-1) window.customers[idx]=c; else (window.customers||[]).push(c);
-    }
-    try{ window.lsSave && lsSave(); window.updS && updS(); if(['customers','myexpenses','checkin','dash'].includes(window.currentPage)) window.renderPage(window.currentPage); }catch(_){ }
-  };
-  log('handleRealtimeCustomer patched for string id compare');
-  window.saveCust = async function(){
-    const getV=id=>{ const el=document.getElementById(id); return el?el.value.trim():''; };
-    const name=getV('cu-name'), mob=getV('cu-mob');
-    if(!name||!mob){ try{ toast('Name and mobile required','var(--red)'); }catch(_){ } return; }
-    const spSel=document.getElementById('cu-sp');
-    const spId = (spSel && spSel.value) || (window.curUser?window.curUser.id:'admin');
-    const sp = (window.spList||[]).find(s=>asId(s.id)===asId(spId)) || { name:'Admin' };
-    const lat=parseFloat(getV('cu-lat'))||null; const lng=parseFloat(getV('cu-lng'))||null;
-    const newCust={ id:'c_'+Date.now(), name, gst:getV('cu-gst').toUpperCase(), mob, con:getV('cu-con'), city:getV('cu-city'), state:getV('cu-state'), addr:getV('cu-addr'), type:getV('cu-type')||'Retailer', spId:asId(spId), spName:sp.name, lat, lng };
-    (window.customers||window.customers===undefined?window.customers:window.customers).push(newCust);
-    try{ window.saveData && saveData(); }catch(_){ }
-    const ok = await window.sbSaveCustomer(newCust);
-    try{
-      if(window._cuMap){ _cuMap.remove(); window._cuMap=null; window._cuMarker=null; }
-      window.closeM && closeM('mCust'); ['cu-name','cu-gst','cu-mob','cu-con','cu-city','cu-state','cu-addr'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
-      const mp=document.getElementById('cuMapDiv'); if(mp) mp.style.display='none';
-      const ph=document.getElementById('cuMapPlaceholder'); if(ph) ph.style.display='flex';
-      const ls=document.getElementById('cu-lat'); if(ls) ls.value=''; const lgs=document.getElementById('cu-lng'); if(lgs) lgs.value='';
-      window._lastSyncCounts && (_lastSyncCounts.customers = (window.customers||[]).length);
-      window.toast && toast(ok?('Customer added: '+name):('Customer saved (pending sync): '+name), ok?'var(--grn)':'var(--acc)');
-      window.updS && updS(); window.go && go('customers');
-    }catch(_){ }
-  };
-  log('saveCust patched with string id + UX');
-  async function flushQueue(){
-    if(!window.supaReady) return; const q=loadQ(); if(!q.length) return;
-    const rest=[]; for(const item of q){ try{ await window.sbUpsert(item.t, item.row); } catch(e){ rest.push(item); } }
-    if(rest.length!==q.length){ saveQ(rest); log('flushed pending writes', q.length-rest.length, 'ok,', rest.length, 'left'); }
-  }
-  setInterval(flushQueue, 20000);
-  document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') flushQueue(); });
-  window.addEventListener('online', ()=> flushQueue());
-  log('inline fixes applied');
-})();
-</script>
-<script>
-/* DecoCRM inline fixes (orders+expenses) � 2026-04-05 */
-(function(){
-  if(window.__decocrm_oe_patched__) return; window.__decocrm_oe_patched__=true;
-  const log=(...a)=>console.log('[DecoCRM fix OE]',...a);
-  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-  const asId=v=>v==null?null:String(v);
-  const enq=(t,row)=>{ try{ const k='dcrm_pending_writes_v1'; const q=JSON.parse(localStorage.getItem(k)||'[]'); q.push({t,row,ts:Date.now()}); localStorage.setItem(k,JSON.stringify(q)); }catch(_){} };
-  if(!(window.sbUpsert)){
-    window.sbUpsert = async function(table,row){
-      const { error } = await sb.from(table).upsert(row,{ onConflict:'id' });
-      if(error){ console.error('upsert failed', table, error); throw error; }
-      return true;
-    };
-  }
-  window.sbSaveOrder = async function(o, retries=3){
-    if(!window.supaReady) return false;
-    const row={ id:asId(o.id), cust_id:asId(o.cid), cust_name:o.custName, cust_mob:o.custMob, sp_id:asId(o.spId), sp_name:o.spName, date:o.date, delivery_date:o.ddate||'', items:JSON.stringify(o.items||[]), total:o.total||0, payment:o.pay, priority:o.pri, notes:o.notes||'', status:o.status, dispatch:o.disp?JSON.stringify(o.disp):null, created_at:o.createdAt };
-    let lastErr=null; for(let i=0;i<retries;i++){ try{ await sbUpsert('orders',row); return true; } catch(e){ lastErr=e; await sleep(600*(i+1)); } }
-    enq('orders',row); try{ toast && toast('Order saved offline � will sync when online','var(--acc)'); }catch(_){}
-    console.warn('Queued order for retry', row, lastErr); return false;
-  };
-  window.sbSaveExpense = async function(e, retries=3){
-    if(!window.supaReady) return false;
-    const row={ id:asId(e.id), sp_id:asId(e.spId), sp_name:e.spName, category:e.cat, amount:e.amt, description:e.desc, date:e.date, mode:e.mode, party_id:e.partyId||null, party_name:e.partyName||'', files:JSON.stringify(e.files||[]), status:e.status, admin_note:e.adminNote||'', created_at:e.createdAt };
-    let lastErr=null; for(let i=0;i<retries;i++){ try{ await sbUpsert('expenses',row); return true; } catch(err){ lastErr=err; await sleep(600*(i+1)); } }
-    enq('expenses',row); try{ toast && toast('Expense saved offline � will sync when online','var(--acc)'); }catch(_){}
-    console.warn('Queued expense for retry', row, lastErr); return false;
-  };
-  window.handleRealtimeOrder = function(payload){
-    const r = payload && (payload.new||payload.old); if(!r) return;
-    const rid = asId(r.id);
-    if(payload.eventType==='DELETE'){
-      window.orders = (window.orders||[]).filter(o=>asId(o.id)!==rid);
-    } else {
-      const o={ id:rid, cid:asId(r.cust_id), custName:r.cust_name, custMob:r.cust_mob, spId:asId(r.sp_id), spName:r.sp_name, date:r.date, ddate:r.delivery_date, items:[], total:r.total, pay:r.payment, pri:r.priority, notes:r.notes, status:r.status, disp:null, createdAt:r.created_at };
-      try{ o.items = JSON.parse(r.items||'[]'); }catch(_){}
-      try{ o.disp = r.dispatch?JSON.parse(r.dispatch):null; }catch(_){}
-      const idx=(window.orders||[]).findIndex(x=>asId(x.id)===rid); if(idx>-1) window.orders[idx]=o; else (window.orders||[]).push(o);
-    }
-    try{ lsSave && lsSave(); updS && updS(); if(['orders','myorders','dispatch','dash','reports'].includes(window.currentPage)) renderPage(window.currentPage); updBadges && updBadges(); }catch(_){}
-  };
-  window.handleRealtimeExpense = function(payload){
-    const r = payload && (payload.new||payload.old); if(!r) return;
-    const rid = asId(r.id);
-    if(payload.eventType==='DELETE'){
-      window.expenses = (window.expenses||[]).filter(e=>asId(e.id)!==rid);
-    } else {
-      const e={ id:rid, spId:asId(r.sp_id), spName:r.sp_name, cat:r.category, amt:r.amount, desc:r.description, date:r.date, mode:r.mode, partyId:r.party_id, partyName:r.party_name, files:[], status:r.status, adminNote:r.admin_note, createdAt:r.created_at };
-      try{ e.files = JSON.parse(r.files||'[]'); }catch(_){}
-      const idx=(window.expenses||[]).findIndex(x=>asId(x.id)===rid); if(idx>-1) window.expenses[idx]=e; else (window.expenses||[]).push(e);
-    }
-    try{ lsSave && lsSave(); updS && updS(); if(['expenses','myexpenses','dash','reports'].includes(window.currentPage)) renderPage(window.currentPage); updBadges && updBadges(); }catch(_){}
-  };
-  log('orders/expenses robustness applied');
-})();
-</script>
-<script>
-/* DecoCRM inline fixes (products + SP + live locations) � 2026-04-05 */
-(function(){
-  if(window.__decocrm_prodsp_patched__) return; window.__decocrm_prodsp_patched__=true;
-  const log=(...a)=>console.log('[DecoCRM fix PROD/SP]',...a);
-  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-  const asId=v=>v==null?null:String(v);
-  const enq=(t,row)=>{ try{ const k='dcrm_pending_writes_v1'; const q=JSON.parse(localStorage.getItem(k)||'[]'); q.push({t,row,ts:Date.now()}); localStorage.setItem(k,JSON.stringify(q)); }catch(_){} };
-  if(!(window.sbUpsert)){
-    window.sbUpsert = async function(table,row){ const { error } = await sb.from(table).upsert(row,{ onConflict:'id' }); if(error){ throw error; } return true; };
-  }
-  window.sbSaveProduct = async function(p, retries=3){
-    if(!window.supaReady) return false;
-    const row={ id:asId(p.id), name:p.name, code:p.code, category:p.cat, price:p.price, unit:p.unit, sizes:p.sizes||'', hsn:p.hsn||'', description:p.desc||'' };
-    let lastErr=null; for(let i=0;i<retries;i++){ try{ await sbUpsert('products',row); return true; } catch(e){ lastErr=e; await sleep(600*(i+1)); } }
-    enq('products',row); try{ toast && toast('Product saved offline � will sync when online','var(--acc)'); }catch(_){}
-    console.warn('Queued product for retry', row, lastErr); return false;
-  };
-  window.sbSaveSP = async function(s, retries=3){
-    if(!window.supaReady) return false;
-    const row={ id:asId(s.id), name:s.name, pass:s.pass, mob:s.mob, zone:s.zone||'', status:s.status||'active', join_date:s.joinDate||'', orders:s.orders||0 };
-    let lastErr=null; for(let i=0;i<retries;i++){ try{ await sbUpsert('salespersons',row); return true; } catch(e){ lastErr=e; await sleep(600*(i+1)); } }
-    enq('salespersons',row); try{ toast && toast('Salesperson saved offline � will sync when online','var(--acc)'); }catch(_){}
-    console.warn('Queued salesperson for retry', row, lastErr); return false;
-  };
-  window.handleRealtimeProduct = function(payload){
-    const r = payload && (payload.new||payload.old); if(!r) return;
-    const rid = asId(r.id);
-    if(payload.eventType==='DELETE'){
-      window.products = (window.products||[]).filter(p=>asId(p.id)!==rid);
-    } else {
-      const p={ id:rid, name:r.name, code:r.code, cat:r.category, price:r.price, unit:r.unit, sizes:r.sizes, hsn:r.hsn, desc:r.description };
-      const idx=(window.products||[]).findIndex(x=>asId(x.id)===rid); if(idx>-1) window.products[idx]=p; else (window.products||[]).push(p);
-    }
-    try{ lsSave && lsSave(); if(['products','dash','reports','orders'].includes(window.currentPage)) renderPage(window.currentPage); }catch(_){}
-  };
-  window.handleRealtimeSP = function(payload){
-    const r = payload && (payload.new||payload.old); if(!r) return;
-    const rid = asId(r.id);
-    if(payload.eventType==='DELETE'){
-      window.spList = (window.spList||[]).filter(s=>asId(s.id)!==rid);
-    } else {
-      const idx=(window.spList||[]).findIndex(s=>asId(s.id)===rid);
-      const incoming = { id:rid, name:r.name, pass:r.pass, mob:r.mob, zone:r.zone||'', status:r.status||'active', orders:r.orders||0, joinDate:r.join_date||'' };
-      if(idx>-1){
-        const cur = window.spList[idx];
-        window.spList[idx] = { ...incoming, checkedIn: cur.checkedIn||false, cin: cur.cin||'�', visits: cur.visits||0, km: cur.km||'0 km', route: cur.route||[], liveLat: cur.liveLat, liveLng: cur.liveLng };
-      } else {
-        window.spList.push({ ...incoming, checkedIn:false, cin:'�', visits:0, km:'0 km', route:[] });
-      }
-    }
-    try{ lsSave && lsSave(); updS && updS(); if(['salespersons','dispatchstaff','map','dash'].includes(window.currentPage)) renderPage(window.currentPage); }catch(_){}
-  };
-  const _origLive = window.handleRealtimeLiveLocation;
-  window.handleRealtimeLiveLocation = function(payload){
-    const r = payload && (payload.new||payload.old); if(!r) return;
-    const rid = asId(r.id);
-    if(rid && (rid.endsWith('_event') || rid.includes('_ev_'))) return _origLive ? _origLive(payload) : undefined;
-    const sp = (window.spList||[]).find(s=>asId(s.id)===rid);
-    if(!sp) return _origLive ? _origLive(payload) : undefined;
-    return _origLive ? _origLive(payload) : undefined;
-  };
-  if(window.supaReady && window.sb && !window.__prod_channel){
-    try{
-      window.__prod_channel = sb.channel('dcrm-products', {} )
-        .on('postgres_changes', { event:'*', schema:'public', table:'products' }, payload=>{ window.handleRealtimeProduct(payload); })
-        .subscribe();
-    }catch(e){ console.warn('Products realtime subscribe failed', e); }
-  }
-  log('products + salespersons realtime/saves hardened');
-})();
-</script>
-
