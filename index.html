@@ -1463,7 +1463,6 @@ let sb = null;
 let supaReady = false;
 
 function initSupabase(){
-  if(supaReady) return; // already initialised — safe to call multiple times
   if(SUPA_URL==='YOUR_SUPABASE_URL'||SUPA_KEY==='YOUR_SUPABASE_ANON_KEY'){
     console.warn('Supabase keys not set — using localStorage fallback');
     return false;
@@ -1635,71 +1634,73 @@ async function sbSaveSP(s){ if(!supaReady)return; const row={id:s.id,name:s.name
 // ---------- Load all data from Supabase ----------
 async function loadFromSupabase(silent=false){
   if(!supaReady){ lsLoad(); return; }
+  if(!silent) showDbLoader(true);
   try{
-    // Fetch core data in parallel — fast single round-trip
     const [custs,ords,prods,sps,exps] = await Promise.all([
       sbGet('customers'), sbGet('orders'), sbGet('products'),
       sbGet('salespersons'), sbGet('expenses')
     ]);
-
     if(custs){
+      // Merge: start with Supabase data, then add any local customers not yet in DB
       const fromDB = custs.map(r=>({id:r.id,name:r.name,gst:r.gst,mob:r.mob,con:r.contact,city:r.city,state:r.state,addr:r.addr,type:r.type,spId:r.sp_id,spName:r.sp_name,lat:r.lat||null,lng:r.lng||null}));
       const dbIds = new Set(fromDB.map(c=>String(c.id)));
-      customers = [...fromDB, ...customers.filter(c=>!dbIds.has(String(c.id)))];
+      // Keep any local customers not yet in Supabase (just added, write in-flight)
+      const localOnly = customers.filter(c => !dbIds.has(String(c.id)));
+      customers = [...fromDB, ...localOnly];
     }
     if(ords){
-      const fromDB = ords.map(r=>({id:r.id,cid:r.cust_id,custName:r.cust_name,custMob:r.cust_mob,spId:r.sp_id,spName:r.sp_name,date:r.date,ddate:r.delivery_date,items:JSON.parse(r.items||'[]'),total:r.total,pay:r.payment,pri:r.priority,notes:r.notes,status:r.status,disp:r.dispatch?JSON.parse(r.dispatch):null,createdAt:r.created_at}));
-      const dbIds = new Set(fromDB.map(o=>String(o.id)));
-      orders = [...fromDB, ...orders.filter(o=>!dbIds.has(String(o.id)))];
+      const fromDBOrds = ords.map(r=>({id:r.id,cid:r.cust_id,custName:r.cust_name,custMob:r.cust_mob,spId:r.sp_id,spName:r.sp_name,date:r.date,ddate:r.delivery_date,items:JSON.parse(r.items||'[]'),total:r.total,pay:r.payment,pri:r.priority,notes:r.notes,status:r.status,disp:r.dispatch?JSON.parse(r.dispatch):null,createdAt:r.created_at}));
+      const dbOrdIds = new Set(fromDBOrds.map(o=>String(o.id)));
+      const localOnlyOrds = orders.filter(o => !dbOrdIds.has(String(o.id)));
+      orders = [...fromDBOrds, ...localOnlyOrds];
     }
     if(prods&&prods.length) products=prods.map(r=>({id:r.id,name:r.name,code:r.code,cat:r.category,price:r.price,unit:r.unit,sizes:r.sizes,hsn:r.hsn,desc:r.description}));
     if(sps&&sps.length){
       sps.forEach(r=>{
         if(r.role==='dispatch'){
+          // Load dispatch staff into dispatchList
           const didx=dispatchList.findIndex(d=>d.id===r.id);
           const dobj={id:r.id,name:r.name,pass:r.pass,mob:r.mob||'',zone:r.zone||'Main Warehouse',status:r.status,role:'dispatch',joinDate:r.join_date||''};
           if(didx>-1) dispatchList[didx]=dobj; else dispatchList.push(dobj);
         } else {
+          // Load salesperson into spList
           const idx=spList.findIndex(s=>s.id===r.id);
           if(idx>-1){spList[idx].name=r.name;spList[idx].pass=r.pass;spList[idx].mob=r.mob;spList[idx].zone=r.zone;spList[idx].status=r.status;spList[idx].orders=r.orders||0;}
-          else{spList.push({id:r.id,name:r.name,pass:r.pass,mob:r.mob,zone:r.zone,status:r.status,orders:r.orders||0,checkedIn:false,cin:'—',visits:0,km:'0 km',pd:0,route:[]});}
+          else {spList.push({id:r.id,name:r.name,pass:r.pass,mob:r.mob,zone:r.zone,status:r.status,orders:r.orders||0,checkedIn:false,cin:'—',visits:0,km:'0 km',pd:0,route:[]});}
         }
       });
     }
     if(exps){
-      const fromDB = exps.map(r=>({id:r.id,spId:r.sp_id,spName:r.sp_name,cat:r.category,amt:r.amount,desc:r.description,date:r.date,mode:r.mode,partyId:r.party_id,partyName:r.party_name,files:JSON.parse(r.files||'[]'),status:r.status,adminNote:r.admin_note,createdAt:r.created_at}));
-      const dbIds = new Set(fromDB.map(e=>String(e.id)));
-      expenses = [...fromDB, ...expenses.filter(e=>!dbIds.has(String(e.id)))];
+      const fromDBExps = exps.map(r=>({id:r.id,spId:r.sp_id,spName:r.sp_name,cat:r.category,amt:r.amount,desc:r.description,date:r.date,mode:r.mode,partyId:r.party_id,partyName:r.party_name,files:JSON.parse(r.files||'[]'),status:r.status,adminNote:r.admin_note,createdAt:r.created_at}));
+      const dbExpIds = new Set(fromDBExps.map(e=>String(e.id)));
+      const localOnlyExps = expenses.filter(e => !dbExpIds.has(String(e.id)));
+      expenses = [...fromDBExps, ...localOnlyExps];
     }
-    // Update sync counts after successful load
-    _lastSyncCounts = {customers:customers.length, orders:orders.length, expenses:expenses.length};
+    // Load transport from Supabase
+    try{ const {data:trData}=await sb.from('transport').select('*'); if(trData&&trData.length) transportList=trData.map(r=>({id:r.id,name:r.name,contact:r.contact||'',mob:r.mob||'',type:r.type||'Courier',city:r.city||'',notes:r.notes||'',status:r.status||'active'})); }catch(e){}
     lsSave();
-    // Non-critical background loads (don't await — don't block app startup)
-    Promise.all([
-      loadOfficeFromSupabase(),
-      sb.from('transport').select('*').then(({data})=>{
-        if(data&&data.length) transportList=data.map(r=>({id:r.id,name:r.name,contact:r.contact||'',mob:r.mob||'',type:r.type||'Courier',city:r.city||'',notes:r.notes||'',status:r.status||'active'}));
-      }).catch(()=>{}),
-      sb.from('settings').select('value').eq('key','admin_pass').maybeSingle().then(({data})=>{
-        if(data&&data.value) localStorage.setItem('dcrm_admin_pass',data.value);
-      }).catch(()=>{}),
-    ]).then(()=>{
-      if(officeLat&&officeLng){
-        spList.forEach(s=>{
-          if(s.route&&s.route.length>0&&s.route[0].t==='start'){
-            s.route[0].lat=officeLat; s.route[0].lng=officeLng; s.route[0].lbl=officeName||'Office';
-          }
-        });
-      }
-      loadSpLiveLocations(); // load live SP positions in background
-    });
-    // Start realtime channel (idempotent)
+    if(!silent) toast('☁️ Data loaded from Supabase!','var(--grn)');
+    await loadOfficeFromSupabase();
+    // Normalize all SP route start points to match current office location
+    if(officeLat && officeLng){
+      spList.forEach(s => {
+        if(s.route && s.route.length > 0 && s.route[0].t === 'start'){
+          s.route[0].lat = officeLat;
+          s.route[0].lng = officeLng;
+          s.route[0].lbl = officeName || 'Office';
+        }
+      });
+    }
+    // Load latest live locations for admin map
+    await loadSpLiveLocations();
+    // Load admin password from Supabase settings
+    try{
+      const {data:apd}=await sb.from('settings').select('value').eq('key','admin_pass').maybeSingle();
+      if(apd&&apd.value) localStorage.setItem('dcrm_admin_pass',apd.value);
+    }catch(e){}
     startRealtime();
-  }catch(e){
-    console.error('Supabase load error',e);
-    lsLoad();
-    if(!silent) toast('Using local data — check connection','var(--acc)');
-  }
+  }catch(e){ console.error('Supabase load error',e); lsLoad(); if(!silent) toast('Supabase error — using local data','var(--acc)'); }
+  if(!silent) showDbLoader(false);
 }
 
 function showDbLoader(show){
@@ -1714,92 +1715,19 @@ function showDbLoader(show){
 lsLoad();
 normalizeSpRoutes(); // Update SP route starts with stored office coords
 setInterval(()=>{ lsSave(); },30000);
-// ─────────────────────────────────────────────────────────────
-// SMART INCREMENTAL SYNC — polls Supabase every 15s for changes
-// Does NOT rely on postgres_changes / realtime subscriptions.
-// Uses COUNT queries to detect changes cheaply, then fetches only
-// if the remote count differs from local count.
-// ─────────────────────────────────────────────────────────────
+// Periodic sync: re-pull from Supabase every 90s as realtime fallback
+// This catches any events missed due to connection drops
 let _syncTimer = null;
-let _lastSyncCounts = {customers:0, orders:0, expenses:0};
-
-async function smartSync(){
-  if(!supaReady || !curUser) return;
-  try{
-    // Cheap count check — only fetch full data if counts differ
-    const [cc, oc, ec] = await Promise.all([
-      sb.from('customers').select('id',{count:'exact',head:true}),
-      sb.from('orders').select('id',{count:'exact',head:true}),
-      sb.from('expenses').select('id',{count:'exact',head:true}),
-    ]);
-    const remoteC = cc.count ?? 0;
-    const remoteO = oc.count ?? 0;
-    const remoteE = ec.count ?? 0;
-    const localC = customers.length;
-    const localO = orders.length;
-    const localE = expenses.length;
-
-    let changed = false;
-
-    // Fetch only tables that changed
-    const firstRun = (_lastSyncCounts.customers===0 && _lastSyncCounts.orders===0);
-    if(firstRun || remoteC !== _lastSyncCounts.customers || remoteC !== localC){
-      const {data} = await sb.from('customers').select('*');
-      if(data){
-        const fromDB = data.map(r=>({id:r.id,name:r.name,gst:r.gst,mob:r.mob,con:r.contact,city:r.city,state:r.state,addr:r.addr,type:r.type,spId:r.sp_id,spName:r.sp_name,lat:r.lat||null,lng:r.lng||null}));
-        const dbIds = new Set(fromDB.map(c=>String(c.id)));
-        const localOnly = customers.filter(c=>!dbIds.has(String(c.id)));
-        customers = [...fromDB, ...localOnly];
-        _lastSyncCounts.customers = remoteC;
-        changed = true;
-      }
-    }
-    if(firstRun || remoteO !== _lastSyncCounts.orders || remoteO !== localO){
-      const {data} = await sb.from('orders').select('*');
-      if(data){
-        const fromDB = data.map(r=>({id:r.id,cid:r.cust_id,custName:r.cust_name,custMob:r.cust_mob,spId:r.sp_id,spName:r.sp_name,date:r.date,ddate:r.delivery_date,items:JSON.parse(r.items||'[]'),total:r.total,pay:r.payment,pri:r.priority,notes:r.notes,status:r.status,disp:r.dispatch?JSON.parse(r.dispatch):null,createdAt:r.created_at}));
-        const dbIds = new Set(fromDB.map(o=>String(o.id)));
-        const localOnly = orders.filter(o=>!dbIds.has(String(o.id)));
-        orders = [...fromDB, ...localOnly];
-        _lastSyncCounts.orders = remoteO;
-        changed = true;
-      }
-    }
-    if(firstRun || remoteE !== _lastSyncCounts.expenses || remoteE !== localE){
-      const {data} = await sb.from('expenses').select('*');
-      if(data){
-        const fromDB = data.map(r=>({id:r.id,spId:r.sp_id,spName:r.sp_name,cat:r.category,amt:r.amount,desc:r.description,date:r.date,mode:r.mode,partyId:r.party_id,partyName:r.party_name,files:JSON.parse(r.files||'[]'),status:r.status,adminNote:r.admin_note,createdAt:r.created_at}));
-        const dbIds = new Set(fromDB.map(e=>String(e.id)));
-        const localOnly = expenses.filter(e=>!dbIds.has(String(e.id)));
-        expenses = [...fromDB, ...localOnly];
-        _lastSyncCounts.expenses = remoteE;
-        changed = true;
-      }
-    }
-
-    if(changed){
-      lsSave(); updS(); updBadges();
-      const dataPages=['orders','myorders','customers','expenses','myexpenses','dash','reports','salesreport','salespersons','attendance'];
-      if(dataPages.includes(currentPage)) renderPage(currentPage);
-    }
-  }catch(e){ /* silent — network may be flaky */ }
-}
-
 function startPeriodicSync(){
   if(_syncTimer) return;
-  // Run immediately on start, then every 10 seconds
-  smartSync();
-  _syncTimer = setInterval(()=>{
-    startRealtime(); // reconnect channel if it dropped
-    smartSync();
-  }, 10000);
-  // Sync immediately when user returns to this tab/app
-  document.addEventListener('visibilitychange', ()=>{
-    if(document.visibilityState==='visible' && supaReady && curUser){
-      startRealtime();
-      smartSync();
-    }
-  });
+  _syncTimer = setInterval(async ()=>{
+    if(!supaReady || !curUser) return;
+    await loadFromSupabase(true);
+    updS(); updBadges();
+    // Only re-render if on a data page (not maps — they handle their own refresh)
+    const dataPages = ['orders','myorders','customers','expenses','myexpenses','dash','reports','salespersons','attendance'];
+    if(dataPages.includes(currentPage)) renderPage(currentPage);
+  }, 90000); // every 90 seconds
 }
 
 // ============================================================
@@ -1807,15 +1735,7 @@ function startPeriodicSync(){
 // ============================================================
 let realtimeChannel = null;
 function startRealtime(){
-  if(!supaReady) return;
-  // If channel exists and is healthy, skip. If it failed, rebuild it.
-  if(realtimeChannel){
-    const state = realtimeChannel.state;
-    if(state==='joined'||state==='joining') return; // already good
-    // Channel is dead — remove and recreate
-    try{ sb.removeChannel(realtimeChannel); }catch(e){}
-    realtimeChannel=null;
-  }
+  if(!supaReady||realtimeChannel) return;
   realtimeChannel = sb.channel('dcrm-realtime', {config:{broadcast:{self:false}}})
     // ── Database change subscriptions ──
     .on('postgres_changes',{event:'*',schema:'public',table:'orders'},payload=>{
@@ -1856,8 +1776,6 @@ function startRealtime(){
 function handlePunchBroadcast(payload){
   const d = payload.payload;
   if(!d || !curUser) return;
-  // Always log to console so we can debug
-  console.log('[Punch broadcast received]', d);
   if(curUser.role === 'admin'){
     const spName = d.name || 'Salesperson';
     const t = d.time || '';
@@ -2366,9 +2284,6 @@ async function doLogin(){
   const err=document.getElementById('loginErr');
   const btn=document.querySelector('.l-btn');
   if(btn){btn.textContent='Signing in...';btn.disabled=true;}
-  // Always ensure Supabase is initialised before login (needed for writes)
-  initSupabase();
-  if(!spList.length) await loadFromSupabase(true);
 
   // Admin login — check against stored hash or plain text (migration)
   if(id==='admin'){
@@ -2381,13 +2296,14 @@ async function doLogin(){
       saveSession();
       err.style.display='none';
       document.getElementById('loginScreen').style.display='none';
-      if(btn){btn.textContent='Sign In';btn.disabled=false;}
-      // initSupabase already called at top of doLogin
+      if(btn){btn.textContent='🚀 Login';btn.disabled=false;}
       startApp(); return;
     }
   }
 
   // Salesperson login — hash-aware check
+  // Try to load fresh data from Supabase if spList is empty (new device)
+  if(!spList.length&&!supaReady){ initSupabase(); await loadFromSupabase(); }
   const hashed=await hashPass(pass);
   const sp=spList.find(s=>s.id===id&&s.status==='active'&&(s.pass===hashed||(!isHashed(s.pass)&&s.pass===pass)));
   if(sp){
@@ -2433,7 +2349,7 @@ async function doLogin(){
     err.style.display='none';
     document.getElementById('loginScreen').style.display='none';
     // Dispatch staff goes directly to app (no punch screen)
-    if(btn){btn.textContent='Sign In';btn.disabled=false;}
+    if(btn){btn.textContent='🚀 Login';btn.disabled=false;}
     startApp(); return;
   }
   err.style.display='block';
@@ -2644,20 +2560,20 @@ function startApp(){
   buildNav();
   const today=new Date().toISOString().split('T')[0];
   ['o-date','d-date'].forEach(id=>{const e=document.getElementById(id);if(e)e.value=today;});
-  // initSupabase is always called before startApp — this is defensive
-  initSupabase();
+  // Init Supabase + load fresh data
+  // Only init+load if not already done (session restore pre-loads)
+  if(!supaReady){ initSupabase(); }
   if(!supaReady){
-    // First-ever load (no session) — fetch everything then show dashboard
     loadFromSupabase().then(()=>{ updS(); updBadges(); go('dash'); startPeriodicSync(); });
   } else {
-    // Data was loaded before startApp was called — go straight to dashboard
     updS(); updBadges(); go('dash');
-    startPeriodicSync();
-    // Background sync to get fresh data from all devices (non-blocking)
+    // Refresh data quietly in background
     loadFromSupabase(true).then(()=>{
       updS(); updBadges();
-      if(currentPage) renderPage(currentPage);
-    }).catch(()=>{});
+      // Re-render current page with fresh data from all devices
+      renderPage(currentPage);
+    });
+    startPeriodicSync();
   }
 }
 
@@ -3690,11 +3606,9 @@ async function saveCust(){
   const ph=document.getElementById('cuMapPlaceholder');if(ph)ph.style.display='flex';
   const ls=document.getElementById('cu-lat');if(ls)ls.value='';
   const lgs=document.getElementById('cu-lng');if(lgs)lgs.value='';
-  // Update sync count so smartSync doesn't re-fetch our own just-saved record
-  _lastSyncCounts.customers = customers.length;
   toast('Customer added: '+n); updS(); go('customers');
 }
-function delCust(id){if(!confirm('Delete this customer?'))return;customers=customers.filter(c=>c.id!==id);sbDelete('customers',String(id));_lastSyncCounts.customers=customers.length;saveData();updS();toast('Customer deleted','var(--red)');go('customers');}
+function delCust(id){if(!confirm('Delete this customer?'))return;customers=customers.filter(c=>c.id!==id);sbDelete('customers',String(id));saveData();updS();toast('Customer deleted','var(--red)');go('customers');}
 function updCustSP(){
   const s=document.getElementById('cu-sp'); if(!s)return;
   s.innerHTML='<option value="admin">Admin</option>'+spList.map(sp=>`<option value="${sp.id}">${sp.name}</option>`).join('');
@@ -3811,7 +3725,6 @@ function importBulkParty(){
   document.getElementById('bulkPartyText').value='';
   document.getElementById('bulkPartyPreview').style.display='none';
   window._bulkPartyParsed=null;
-  _lastSyncCounts.customers = customers.length;
   toast(`✅ ${added} parties imported! ${skipped} duplicate(s) skipped.`);
   go('customers');
 }
@@ -4703,7 +4616,6 @@ function saveOrder(){
   };
   orders.unshift(o); sbSaveOrder(o);
   if(curUser.role==='sales'){const s=spList.find(x=>x.id===curUser.id); if(s)s.orders++;}
-  _lastSyncCounts.orders = orders.length;
   closeM('mOrder');
   addNotif('order','New Order: '+o.id,'Customer: '+cu.name+' | ₹'+total.toLocaleString('en-IN')+' | '+o.spName,o.id);
   toast('Order submitted! Team notified. ID: '+o.id);
@@ -4860,7 +4772,6 @@ function saveExpense(){
     createdAt:new Date().toLocaleString('en-IN')
   };
   expenses.unshift(exp); sbSaveExpense(exp);
-  _lastSyncCounts.expenses = expenses.length;
   closeM('mExpense');
   saveData();
   addNotif('expense','💸 New Expense: '+exp.id,sp.name+' — ₹'+amt.toLocaleString('en-IN')+' | '+cat,exp.id);
@@ -5051,85 +4962,119 @@ function clearSession(){
 }
 
 async function tryRestoreSession(){
-  let raw=null;
-  try{ raw=localStorage.getItem('dcrm_persist'); }catch(e){}
-  if(!raw){ try{ raw=sessionStorage.getItem('dcrm_sess'); }catch(e){} }
+  // Read from localStorage (works on mobile, survives refresh + tab close)
+  let raw = null;
+  try{ raw = localStorage.getItem('dcrm_persist'); }catch(e){}
+  if(!raw){
+    // Fallback: check old sessionStorage format (migration)
+    try{ raw = sessionStorage.getItem('dcrm_sess'); }catch(e){}
+  }
   if(!raw) return false;
 
   try{
-    const s=JSON.parse(raw);
-    if(!s||!s.id||!s.role) return false;
+    const s = JSON.parse(raw);
+    if(!s || !s.id || !s.role) return false;
 
-    // Always init Supabase first
-    initSupabase();
+    // STEP 1: Hide login screen immediately (before any async work)
+    // Removes the flash — user sees nothing until app is ready
+    const loginEl = document.getElementById('loginScreen');
+    if(loginEl){ loginEl.classList.add('pre-hidden'); loginEl.style.display='none'; }
 
-    // Load local cache immediately (instant, no network)
+    // STEP 2: Load local data first (instant, no network needed)
+    // This lets us verify the user exists from cached data
     lsLoad();
     normalizeSpRoutes();
 
-    // Identify user from local cache
-    let verified = false;
-    if(s.role==='admin'){
-      curUser={id:'admin',name:'Admin',role:'admin'};
-      verified=true;
-    } else if(s.role==='sales'){
-      const sp=spList.find(x=>x.id===s.id&&x.status==='active');
-      if(sp){ curUser={id:sp.id,name:sp.name,role:'sales'}; verified=true; }
-    } else if(s.role==='dispatch'){
-      const dp=dispatchList.find(x=>x.id===s.id&&x.status==='active');
-      if(dp){ curUser={id:dp.id,name:dp.name,role:'dispatch'}; verified=true; }
-    }
-
-    if(!verified){
-      // Not in local cache — clear session and show login
+    // STEP 3: Verify user identity from local cache first
+    if(s.role === 'admin'){
+      curUser = {id:'admin', name:'Admin', role:'admin'};
+    } else if(s.role === 'sales'){
+      // Try local cache first, then Supabase
+      let sp = spList.find(x => x.id === s.id && x.status === 'active');
+      if(!sp){
+        // Not in cache — try Supabase
+        initSupabase();
+        await loadFromSupabase(true);
+        sp = spList.find(x => x.id === s.id && x.status === 'active');
+      }
+      if(!sp){
+        // User no longer exists or deactivated
+        clearSession();
+        if(loginEl){ loginEl.classList.remove('pre-hidden'); loginEl.style.display='flex'; }
+        return false;
+      }
+      curUser = {id:sp.id, name:sp.name, role:'sales'};
+    } else if(s.role === 'dispatch'){
+      let dp = dispatchList.find(x => x.id === s.id && x.status === 'active');
+      if(!dp){
+        initSupabase();
+        await loadFromSupabase(true);
+        dp = dispatchList.find(x => x.id === s.id && x.status === 'active');
+      }
+      if(!dp){
+        clearSession();
+        if(loginEl){ loginEl.classList.remove('pre-hidden'); loginEl.style.display='flex'; }
+        return false;
+      }
+      curUser = {id:dp.id, name:dp.name, role:'dispatch'};
+    } else {
       clearSession();
+      if(loginEl){ loginEl.classList.remove('pre-hidden'); loginEl.style.display='flex'; }
       return false;
     }
 
-    // Hide login screen NOW — user is verified
-    const loginEl=document.getElementById('loginScreen');
-    if(loginEl){ loginEl.classList.add('pre-hidden'); loginEl.style.display='none'; }
+    // STEP 4: Restore punch state (for sales only)
+    // pinTime comes from localStorage — this is the real source of truth
+    if(s.role === 'sales' && s.pin){
+      pinTime = new Date(s.pin);
+      const cinTime = pinTime.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
 
-    // Restore punch state for sales (from localStorage — instant)
-    if(s.role==='sales' && s.pin){
-      pinTime=new Date(s.pin);
-      const cinTime=pinTime.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+      // Desktop punch bar
       document.getElementById('punchbar').classList.add('show');
-      document.getElementById('pbName').textContent=curUser.name+' — Active';
-      document.getElementById('pbSub').textContent='Since '+cinTime;
-      const mprR=document.getElementById('mobPunchRow');
+      document.getElementById('pbName').textContent = curUser.name + ' — Active';
+      document.getElementById('pbSub').textContent = 'Since ' + cinTime;
+
+      // Mobile punch row
+      const mprR = document.getElementById('mobPunchRow');
       if(mprR) mprR.classList.add('show');
-      const mpnR=document.getElementById('mobPunchName'); if(mpnR) mpnR.textContent=curUser.name;
-      const mpsR=document.getElementById('mobPunchSub'); if(mpsR) mpsR.textContent='Since '+cinTime;
-      wInt=setInterval(()=>{
-        const d=Math.floor((new Date()-pinTime)/1000);
-        const ts=pad(Math.floor(d/3600))+':'+pad(Math.floor(d%3600/60))+':'+pad(d%60);
-        const wt=document.getElementById('wTimer'); if(wt) wt.textContent=ts;
-        const mt=document.getElementById('mobPunchTimer'); if(mt) mt.textContent=ts;
-      },1000);
+      const mpnR = document.getElementById('mobPunchName');
+      if(mpnR) mpnR.textContent = curUser.name;
+      const mpsR = document.getElementById('mobPunchSub');
+      if(mpsR) mpsR.textContent = 'Since ' + cinTime;
+
+      // Start working time timer
+      wInt = setInterval(() => {
+        const d = Math.floor((new Date() - pinTime) / 1000);
+        const ts = pad(Math.floor(d/3600))+':'+pad(Math.floor(d%3600/60))+':'+pad(d%60);
+        const wt = document.getElementById('wTimer'); if(wt) wt.textContent = ts;
+        const mt = document.getElementById('mobPunchTimer'); if(mt) mt.textContent = ts;
+      }, 1000);
+
       startLiveLocationPush();
-      startGPS();
+      startGPS(); // Resume GPS — permission already granted
     }
 
-    // Show UI immediately from local cache
-    if(s.role==='sales' && !s.pin){
-      // Not yet punched in — show punch screen
-      const punchEl=document.getElementById('punchScreen');
-      if(punchEl) punchEl.classList.add('visible');
-      const psName=document.getElementById('psUserName'); if(psName) psName.textContent=curUser.name;
-      const sp2=spList.find(x=>x.id===curUser.id);
-      const psRole=document.getElementById('psUserRole');
-      if(psRole) psRole.textContent='Sales Executive'+(sp2?.zone?' — '+sp2.zone:'');
-      // Still need to start periodic sync so data is fresh when they punch in
-      setTimeout(()=>{ loadFromSupabase(true).catch(()=>{}); startPeriodicSync(); }, 100);
-    } else {
-      // Show app immediately
-      startApp();
+    // STEP 5: Start app (show dashboard immediately from local data)
+    // For sales role: if no pin (not punched in), show punch screen
+    if(s.role === 'sales' && !s.pin){
+      // Show punch screen — user needs to punch in for the day
+      document.getElementById('punchScreen').classList.add('visible');
+      document.getElementById('psUserName').textContent = curUser.name;
+      const sp2 = spList.find(x=>x.id===curUser.id);
+      document.getElementById('psUserRole').textContent = 'Sales Executive' + (sp2?.zone ? ' — '+sp2.zone : '');
+      // Don't call startApp yet — wait for punch-in
+      return true;
     }
+    startApp();
+
+    // STEP 6: Silently refresh from Supabase in background
+    // (don't block — user sees dashboard instantly from cache)
+    if(!supaReady){ initSupabase(); }
+    loadFromSupabase(true).catch(()=>{});
 
     return true;
-  }catch(e){
-    console.warn('Session restore failed:',e);
+  } catch(e){
+    console.warn('Session restore failed:', e);
     clearSession();
     return false;
   }
