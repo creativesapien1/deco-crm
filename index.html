@@ -2653,6 +2653,11 @@ function startApp(){
     // Data was loaded before startApp was called — go straight to dashboard
     updS(); updBadges(); go('dash');
     startPeriodicSync();
+    // Background sync to get fresh data from all devices (non-blocking)
+    loadFromSupabase(true).then(()=>{
+      updS(); updBadges();
+      if(currentPage) renderPage(currentPage);
+    }).catch(()=>{});
   }
 }
 
@@ -5055,16 +5060,15 @@ async function tryRestoreSession(){
     const s=JSON.parse(raw);
     if(!s||!s.id||!s.role) return false;
 
-    // STEP 1: Init Supabase immediately (critical — must happen before any write)
+    // Always init Supabase first
     initSupabase();
 
-    // STEP 2: Load local cache instantly so we can show UI without waiting for network
+    // Load local cache immediately (instant, no network)
     lsLoad();
     normalizeSpRoutes();
 
-    // STEP 3: Identify user from local cache (instant, no network)
-    const loginEl=document.getElementById('loginScreen');
-    let verified=false;
+    // Identify user from local cache
+    let verified = false;
     if(s.role==='admin'){
       curUser={id:'admin',name:'Admin',role:'admin'};
       verified=true;
@@ -5077,16 +5081,17 @@ async function tryRestoreSession(){
     }
 
     if(!verified){
-      // Not in local cache — could be new device; clear and show login
+      // Not in local cache — clear session and show login
       clearSession();
       return false;
     }
 
-    // STEP 4: Hide login screen — user is verified
+    // Hide login screen NOW — user is verified
+    const loginEl=document.getElementById('loginScreen');
     if(loginEl){ loginEl.classList.add('pre-hidden'); loginEl.style.display='none'; }
 
-    // STEP 5: Restore punch state for sales (from localStorage — instant)
-    if(s.role==='sales'&&s.pin){
+    // Restore punch state for sales (from localStorage — instant)
+    if(s.role==='sales' && s.pin){
       pinTime=new Date(s.pin);
       const cinTime=pinTime.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
       document.getElementById('punchbar').classList.add('show');
@@ -5106,23 +5111,21 @@ async function tryRestoreSession(){
       startGPS();
     }
 
-    // STEP 6: Show app immediately from local cache — no waiting for network
-    if(s.role==='sales'&&!s.pin){
-      // Sales user not yet punched in — show punch screen
-      document.getElementById('punchScreen').classList.add('visible');
-      document.getElementById('psUserName').textContent=curUser.name;
+    // Show UI immediately from local cache
+    if(s.role==='sales' && !s.pin){
+      // Not yet punched in — show punch screen
+      const punchEl=document.getElementById('punchScreen');
+      if(punchEl) punchEl.classList.add('visible');
+      const psName=document.getElementById('psUserName'); if(psName) psName.textContent=curUser.name;
       const sp2=spList.find(x=>x.id===curUser.id);
-      document.getElementById('psUserRole').textContent='Sales Executive'+(sp2?.zone?' — '+sp2.zone:'');
+      const psRole=document.getElementById('psUserRole');
+      if(psRole) psRole.textContent='Sales Executive'+(sp2?.zone?' — '+sp2.zone:'');
+      // Still need to start periodic sync so data is fresh when they punch in
+      setTimeout(()=>{ loadFromSupabase(true).catch(()=>{}); startPeriodicSync(); }, 100);
     } else {
+      // Show app immediately
       startApp();
     }
-
-    // STEP 7: Fetch fresh data from Supabase in background (non-blocking)
-    // This updates data without making user wait — smart sync will keep it fresh
-    loadFromSupabase(true).then(()=>{
-      updS(); updBadges();
-      if(currentPage) renderPage(currentPage);
-    }).catch(()=>{});
 
     return true;
   }catch(e){
